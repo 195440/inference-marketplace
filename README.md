@@ -159,4 +159,4 @@ npm run deploy:production               # mainnet relay
 | Env | NETWORK | Relay |
 |-----|---------|-------|
 | dev / staging | testnet | `https://x402-relay.aibtc.dev` |
-| production | mainnet | `https://x402-relay.aibtc.com` |
+| production | mainnet | `https://x402-relay.aibtc.com` 
