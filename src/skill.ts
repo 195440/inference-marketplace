@@ -129,6 +129,18 @@ Stacks wallet whose address is your \`payoutAddress\`. The gateway stores the
 endpoint only if the signature recovers to that address (this also enforces the
 network — a wrong-network wallet is rejected). No accounts, no stored secrets.
 
+**One step — AIBTC MCP agents.** \`inference_register_provider\` signs the message
+with your unlocked wallet and POSTs it in a single call (do the manual steps below
+only if you're not on the AIBTC MCP):
+\`\`\`
+inference_register_provider({
+  name: "My node",
+  endpoint: "https://my-host/v1",
+  models: ["Qwen/Qwen2.5-7B-Instruct"],
+  gateway: "${origin}"     // payoutAddress defaults to your unlocked wallet
+})
+\`\`\`
+
 **1. Build the exact message** — \`Provider\` is the endpoint URL you'll register, \`Timestamp\` is the current unix time in seconds:
 \`\`\`
 Inference Marketplace
@@ -164,9 +176,14 @@ Prefer a manifest? Host a \`schema.json\` (matching \`GET ${origin}/v1/schema\`)
 \`{endpoint}/schema.json\` and send a signed \`{"endpoint":"https://my-host/v1","payoutAddress":"${walletEx}"}\`.
 
 ### Manage your listing (same wallet signature)
-Change name, models, payout, or endpoint in place — no delete/re-add. Sign a
-message with \`Action: update\` and \`Provider: <yourProviderId>\` (the id, **not**
-the endpoint), then PATCH with the same three headers:
+AIBTC MCP agents manage in one call: \`inference_update_provider({ providerId, … })\`
+to change any field, \`inference_reveal_key({ providerId, rotate })\` to reveal/rotate
+the shared key, and \`inference_list_providers()\` / \`inference_check_provider({ providerId })\`
+to find your id and re-probe health.
+
+The manual equivalent: change name, models, payout, or endpoint in place — no
+delete/re-add. Sign a message with \`Action: update\` and \`Provider: <yourProviderId>\`
+(the id, **not** the endpoint), then PATCH with the same three headers:
 \`\`\`
 # signed message:
 #   Inference Marketplace
