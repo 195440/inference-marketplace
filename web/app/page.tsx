@@ -560,10 +560,27 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
   const port = lf.port.trim() || "11434";
   const models = lf.models.split(",").map((m) => m.trim()).filter(Boolean).join(",");
   const ready = !!(name && payout && models);
-  const cmd = `curl -fsSL ${gw}/connect.sh | NAME=${JSON.stringify(name)} WALLET=${payout} MODELS=${JSON.stringify(models)} PORT=${port} GATEWAY=${gw} bash`;
-  const host = lf.host.trim() || "node.yourdomain.com";
-  const tunnel = (lf.host.trim().split(".")[0] || "my-node").replace(/[^a-z0-9-]/gi, "-");
-  const permaCmd = `cloudflared tunnel login\ncloudflared tunnel create ${tunnel}\ncloudflared tunnel route dns ${tunnel} ${host}\n\nTUNNEL=${tunnel} HOST=${host} \\\n  NAME=${JSON.stringify(name)} WALLET=${payout} MODELS=${JSON.stringify(models)} PORT=${port} GATEWAY=${gw} \\\n  ./connect.sh`;
+  const modelId = models.split(",")[0]?.trim() || "";
+  // A self-contained prompt the user pastes into Claude Code (or any AI agent with
+  // the AIBTC MCP): it hosts the model, tunnels it, and registers with a wallet
+  // signature — no terminal script needed.
+  const agentPrompt = `List my local model on the AIBTC Inference Marketplace (${gw}) and get me paid in sBTC. Do it end-to-end:
+
+1. Make sure Ollama is running (run "ollama serve") and pull the model matching "${modelId || "<model>"}" (use its qwen2.5 / llama Ollama tag).
+2. Expose it with a Cloudflare tunnel, rewriting the Host header so Ollama accepts it:
+   cloudflared tunnel --url http://localhost:${port} --http-host-header localhost:${port}
+   Take the printed https://<sub>.trycloudflare.com URL — my endpoint is that URL + "/v1".
+3. Register at ${gw}/v1/providers, proving ownership with my Stacks wallet:
+   - Sign this message (Timestamp = current unix seconds) with stacks_sign_message:
+       Inference Marketplace
+       Action: register
+       Provider: <endpoint>
+       Timestamp: <now>
+   - Get my public key and ${network} address from get_wallet_info.
+   - POST with headers X-Stacks-Signature, X-Stacks-Public-Key, X-Stacks-Timestamp and body:
+       {"name":"${name || "My node"}","endpoint":"<endpoint>","payoutAddress":"${payout || "<wallet>"}","models":["${modelId || "<model>"}"]}
+
+Keep the tunnel running and tell me when my node shows up in the marketplace.`;
 
   return (
     <div className="overlay-in fixed inset-0 z-50 bg-black/65 backdrop-blur-sm" onClick={onClose}>
@@ -610,7 +627,7 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
 
         {tab === "local" ? (
           <div className="mt-4">
-            <p className="mb-3 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 1.</span> Your node details (these fill the command below):</p>
+            <p className="mb-3 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 1.</span> Your node details (these fill the prompt below):</p>
             <label className="mb-3 block">
               <span className="mb-1.5 block text-xs text-[#9aa3af]">Display name</span>
               <input value={lf.name} onChange={(e) => setLf({ ...lf, name: e.target.value })} placeholder="Alice's Qwen node" className={inputCls} />
@@ -627,31 +644,18 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
               <span className="mb-1.5 block text-xs text-[#9aa3af]">Local model port</span>
               <input value={lf.port} onChange={(e) => setLf({ ...lf, port: e.target.value })} placeholder="11434" className={inputCls} />
             </label>
-            <p className="mb-2 mt-1 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 2.</span> Pick one and run it in your terminal — it secures your model behind a key, tunnels it, and registers it. No submit here: the command does it.</p>
-
-            <p className="mb-1.5 mt-3 text-[11px] uppercase tracking-wide text-[#5b626c]">Option A · quick (temporary URL)</p>
+            <p className="mb-2 mt-1 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 2.</span> Paste this into <span className="text-[#f2f4f7]">Claude Code</span> (or any AI agent with the AIBTC MCP). It hosts your model, opens a tunnel, and registers it with your wallet signature — no script to run:</p>
             {ready ? (
-              <Snippet label="one command — secures · tunnels · registers" code={cmd} />
+              <Snippet label="copy → paste into your AI agent" code={agentPrompt} />
             ) : (
-              <div className="rounded-lg border border-dashed border-[#2a2e36] bg-[#0b0d10] px-3 py-3 text-xs text-[#5b626c]">Fill name, wallet &amp; model above — your command appears here.</div>
+              <div className="rounded-lg border border-dashed border-[#2a2e36] bg-[#0b0d10] px-3 py-3 text-xs text-[#5b626c]">Fill name, wallet &amp; model above — your prompt appears here.</div>
             )}
-            <p className="mt-1.5 rounded-md border border-[#ffbf2e]/25 bg-[#ffbf2e]/[0.06] px-2.5 py-2 text-[11px] text-[#9aa3af]">
-              ⚠️ <span className="text-[#ffbf2e]">Temporary</span> — the URL changes on restart, ~200 concurrent max. Fine for a demo; use Option B for a real node.
+            <p className="mt-1.5 rounded-md border border-[#35c759]/25 bg-[#35c759]/[0.06] px-2.5 py-2 text-[11px] text-[#9aa3af]">
+              No wallet keys leave your machine — the agent signs locally with your wallet. No model yet? The agent pulls one for you.
             </p>
 
-            <p className="mb-1.5 mt-4 text-[11px] uppercase tracking-wide text-[#5b626c]">Option B · permanent (named tunnel on your Cloudflare account)</p>
-            <label className="mb-2 block">
-              <span className="mb-1.5 block text-xs text-[#9aa3af]">Your hostname (a subdomain on a domain in your Cloudflare account)</span>
-              <input value={lf.host} onChange={(e) => setLf({ ...lf, host: e.target.value })} placeholder="qwen.aibtc.com" className={inputCls} />
-            </label>
-            {ready ? (
-              <Snippet label="one-time setup, then run connect.sh with TUNNEL= HOST=" code={permaCmd} />
-            ) : (
-              <div className="rounded-lg border border-dashed border-[#2a2e36] bg-[#0b0d10] px-3 py-3 text-xs text-[#5b626c]">Fill name, wallet &amp; model above — your command appears here.</div>
-            )}
-
             <div className="mt-5 border-t border-[#23262d] pt-4">
-              <p className="mb-2 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 3.</span> Whichever you ran, keep it running — then watch for your node to appear:</p>
+              <p className="mb-2 text-xs text-[#9aa3af]"><span className="text-[#f2f4f7]">Step 3.</span> Once the agent registers it, keep the tunnel running — then watch for your node to appear:</p>
               {watching ? (
                 <button onClick={() => setWatching(false)} className="flex w-full items-center justify-center gap-2 rounded-lg border border-[#23262d] bg-[#0b0d10] py-3 text-sm text-[#9aa3af] hover:text-[#f2f4f7]">
                   <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#f7931a] border-t-transparent" />

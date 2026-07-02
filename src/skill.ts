@@ -111,46 +111,101 @@ actually serving inference, then wraps it in x402 so clients pay **you** directl
 bond). Each paid request settles on-chain, non-custodial: **92% → your payout
 wallet**, **8% → the model's legion treasury**. The gateway never holds funds.
 
-### Already public — one request
+### Don't have a model hosted yet?
+Any OpenAI-compatible server works (vLLM / Ollama / SGLang / HF Inference Endpoint).
+Quickest local setup — an agent can run this for you:
+\`\`\`
+ollama serve &                 # OpenAI-compatible API on :11434
+ollama pull qwen2.5:7b         # any open model
+# Ollama rejects non-local Host headers, so rewrite it when tunneling:
+cloudflared tunnel --url http://localhost:11434 --http-host-header localhost:11434
+\`\`\`
+The tunnel prints an \`https://….trycloudflare.com\` URL; your endpoint is that URL + \`/v1\`.
+Use a named cloudflared tunnel for a stable URL that survives restarts.
+
+### Register — one signed request
+Ownership is proven by a **wallet signature**: you sign a short message with the
+Stacks wallet whose address is your \`payoutAddress\`. The gateway stores the
+endpoint only if the signature recovers to that address (this also enforces the
+network — a wrong-network wallet is rejected). No accounts, no stored secrets.
+
+**One step — AIBTC MCP agents.** \`inference_register_provider\` signs the message
+with your unlocked wallet and POSTs it in a single call (do the manual steps below
+only if you're not on the AIBTC MCP):
+\`\`\`
+inference_register_provider({
+  name: "My node",
+  endpoint: "https://my-host/v1",
+  models: ["Qwen/Qwen2.5-7B-Instruct"],
+  gateway: "${origin}"     // payoutAddress defaults to your unlocked wallet
+})
+\`\`\`
+
+**1. Build the exact message** — \`Provider\` is the endpoint URL you'll register, \`Timestamp\` is the current unix time in seconds:
+\`\`\`
+Inference Marketplace
+Action: register
+Provider: https://my-host/v1
+Timestamp: 1782980300
+\`\`\`
+
+**2. Sign it.**
+- AIBTC MCP agents: \`stacks_sign_message({ message })\` → returns the RSV \`signature\`; read your compressed \`publicKey\` and ${network} address from \`get_wallet_info\`.
+- Humans: use ${origin}/dashboard (connect wallet → Register → sign) — it does steps 1–3 for you.
+
+**3. POST with the signature headers** (the timestamp header must equal the one in the signed message):
 \`\`\`
 curl -X POST ${origin}/v1/providers \\
   -H 'Content-Type: application/json' \\
+  -H 'X-Stacks-Signature: <signature>' \\
+  -H 'X-Stacks-Public-Key: <publicKey>' \\
+  -H 'X-Stacks-Timestamp: 1782980300' \\
   -d '{
     "name": "My node",
     "endpoint": "https://my-host/v1",
     "payoutAddress": "${walletEx}",
-    "models": ["Qwen/Qwen2.5-7B-Instruct"],
-    "apiKey": "optional-shared-key"
+    "models": ["Qwen/Qwen2.5-7B-Instruct"]
   }'
 \`\`\`
-- \`models\` are **Hugging Face repo ids** — validated as real, text-generation,
-  and commercially licensed before listing (made-up or non-commercial ids are rejected).
-- \`apiKey\` (optional) is stored server-side and **never returned**; the gateway
-  forwards it, so direct calls without it are rejected.
-- \`payoutAddress\` is a ${network} Stacks address (${walletPrefixes}).
-- On success your node is listed and immediately callable.
+- \`payoutAddress\` **must equal the signer's address** and be a ${network} address (${walletPrefixes}).
+- \`models\` are **Hugging Face repo ids** — validated as real, text-generation, and commercially licensed (made-up / non-commercial ids rejected).
+- \`Timestamp\` must be within **300s** of now; each signature is **single-use** (replay-protected).
+- On success your node is verified, listed, and immediately callable.
 
-You can instead host a \`schema.json\` (matching \`GET ${origin}/v1/schema\`) at
-\`{endpoint}/schema.json\` and register with just \`{"endpoint":"https://my-host/v1"}\`.
+Prefer a manifest? Host a \`schema.json\` (matching \`GET ${origin}/v1/schema\`) at
+\`{endpoint}/schema.json\` and send a signed \`{"endpoint":"https://my-host/v1","payoutAddress":"${walletEx}"}\`.
 
-### Running locally — one command
-Secures your local model behind a shared key, opens a public tunnel, and registers it:
-\`\`\`
-curl -fsSL ${origin}/connect.sh | NAME="My node" WALLET=${walletEx} MODELS=Qwen/Qwen2.5-7B-Instruct GATEWAY=${origin} bash
-\`\`\`
-Keep it running to stay online. For a stable URL, use a named tunnel (\`TUNNEL=\` / \`HOST=\`).
+### Manage your listing (same wallet signature)
+AIBTC MCP agents manage in one call: \`inference_update_provider({ providerId, … })\`
+to change any field, \`inference_reveal_key({ providerId, rotate })\` to reveal/rotate
+the shared key, and \`inference_list_providers()\` / \`inference_check_provider({ providerId })\`
+to find your id and re-probe health.
 
-### Update your listing (no delete/re-add)
-Change name, models, payout, or endpoint in place. Authorize with your shared
-key — \`connect.sh\` saves it to \`~/.inference-marketplace/{id}.env\` (or use the
-\`apiKey\` you registered with):
+The manual equivalent: change name, models, payout, or endpoint in place — no
+delete/re-add. Sign a message with \`Action: update\` and \`Provider: <yourProviderId>\`
+(the id, **not** the endpoint), then PATCH with the same three headers:
 \`\`\`
-source ~/.inference-marketplace/{id}.env
-curl -X PATCH ${origin}/v1/providers/\$PROVIDER_ID \\
-  -H "Authorization: Bearer \$SHARED_KEY" -H 'Content-Type: application/json' \\
-  -d '{"payoutAddress": "${walletEx}"}'
+# signed message:
+#   Inference Marketplace
+#   Action: update
+#   Provider: <yourProviderId>
+#   Timestamp: <now>
+curl -X PATCH ${origin}/v1/providers/<id> \\
+  -H 'Content-Type: application/json' \\
+  -H 'X-Stacks-Signature: <sig>' -H 'X-Stacks-Public-Key: <pub>' -H 'X-Stacks-Timestamp: <ts>' \\
+  -d '{"payoutAddress":"${walletEx}"}'
 \`\`\`
-Only the fields you send change; changing the endpoint or key re-verifies before it takes effect.
+Reveal or rotate your shared key the same way with \`Action: reveal-key\` against
+\`POST /v1/providers/{id}/key\` (send \`{"rotate":true}\` to issue a new one). Humans
+do all of this at ${origin}/dashboard.
+
+### Protect your endpoint (optional)
+An open endpoint is public — anyone with the URL can call your model for free,
+skipping payment. To require payment, lock it so only the gateway can reach it:
+register with an \`apiKey\` your endpoint enforces (the gateway presents it on
+every call), or \`rotate\` a gateway key and require it via a proxy / Cloudflare
+Access. The shared key is **only** this gateway↔endpoint credential — never an
+ownership token (that is your wallet signature).
 
 ### Pricing
 Declare \`pricePerMTokenUsd\` per model (USD per 1M tokens) in your registration;
@@ -184,8 +239,9 @@ How bad providers are handled, so you can trust the catalog:
 | GET | \`/v1/schema\` | free | Provider registration JSON Schema |
 | POST | \`/v1/chat/completions\` | **paid** | OpenAI-compatible; price by model + tokens |
 | POST | \`/v1/route/{id}/chat/completions\` | **paid** | Call a specific provider; settles to them |
-| POST | \`/v1/providers\` | free | Register a provider (verified before listing) |
-| PATCH | \`/v1/providers/{id}\` | free | Self-service update (name/models/payout/endpoint/key); auth with the provider's shared key as \`Authorization: Bearer\` |
+| POST | \`/v1/providers\` | free | Register a provider (**wallet-signature** required; verified before listing) |
+| PATCH | \`/v1/providers/{id}\` | free | Self-service update (name/models/payout/endpoint); **wallet-signature** authorized |
+| POST | \`/v1/providers/{id}/key\` | free | Reveal or rotate your shared key; **wallet-signature** authorized |
 | POST | \`/v1/providers/{id}/flag\` | free | **Operator only** (admin token): flag/unflag a provider (de-route) |
 `;
 }

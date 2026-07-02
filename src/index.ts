@@ -26,6 +26,9 @@ import { renderSkillMd } from './skill';
 type Env = {
   RECIPIENT_ADDRESS: string;
   NETWORK: string;
+  /** Dev-only ("true"): allow http://localhost provider endpoints (set in .dev.vars,
+   *  never in a deployed env). Deployed gateways are always https-only. */
+  ALLOW_LOCAL_ENDPOINTS?: string;
   RELAY_URL: string;
   /** D1 database holding the provider directory (providers + provider_keys). */
   DB: D1Database;
@@ -83,7 +86,7 @@ function markupFrom(env: Env): number | undefined {
   return Number.isFinite(m) && m > 0 ? m : undefined;
 }
 
-/** A fresh shared secret (48 hex chars), same shape connect.sh generates. */
+/** A fresh shared secret (48 hex chars) — the gateway's upstream-routing credential. */
 function genSharedKey(): string {
   const b = new Uint8Array(24);
   crypto.getRandomValues(b);
@@ -594,7 +597,7 @@ app.post('/v1/providers', async (c) => {
   if (badModel) return c.json({ error: badModel.error }, 400);
 
   // Validate + store (status pending). Allow http://localhost only off mainnet.
-  reg.allowLocal = (c.env.NETWORK || 'testnet') !== 'mainnet';
+  reg.allowLocal = c.env.ALLOW_LOCAL_ENDPOINTS === 'true'; // dev-only; deployed = https-only
   reg.network = toNetwork(c.env.NETWORK); // payoutAddress must match this network
   reg.payoutAddress = claimedPayout; // the signature-verified owner wins over any manifest value
   let provider;
@@ -632,24 +635,22 @@ app.post('/v1/providers/:id/check', async (c) => {
   return c.json({ provider: updated });
 });
 
-// Update a provider in place (self-service). Three ways to authorize, in order:
-//   1. Payout-wallet signature — the provider signs a short message with the
-//      Stacks wallet that is their `payoutAddress`. Works for anyone (web/curl/
-//      MCP), including open endpoints with no shared key. Headers:
-//      X-Stacks-Signature, X-Stacks-Public-Key, X-Stacks-Timestamp. A timestamp
-//      + one-time nonce prevent replay.
-//   2. The provider's shared key (`Authorization: Bearer <key>`) — for script/
-//      curl users who registered with connect.sh.
-//   3. ADMIN_TOKEN (X-Admin-Token) — operator override.
+// Update a provider in place (self-service). Authorized ONLY by a payout-wallet
+// signature: the provider signs a short message with the Stacks wallet that is
+// their `payoutAddress` (works from web / curl / MCP). Headers: X-Stacks-Signature,
+// X-Stacks-Public-Key, X-Stacks-Timestamp; a timestamp + one-time nonce prevent
+// replay. The shared key is the gateway's upstream-routing credential, not an
+// ownership token, so it is NOT accepted here.
 // Editable: name, models, payoutAddress, description, api, endpoint, and the
 // shared key itself (rotation). Only fields present in the body change; unknown
 // fields (status/flagged/id/…) are ignored. Changing the endpoint or key
 // re-verifies reachability + function BEFORE the change is saved, so a bad edit
 // can never take a live provider offline.
 //
+// Signed message: "Inference Marketplace\nAction: update\nProvider: <id>\nTimestamp: <unix>"
 //   curl -X PATCH $GATEWAY/v1/providers/$ID \
-//     -H "Authorization: Bearer $SHARED_KEY" -H 'Content-Type: application/json' \
-//     -d '{"models":[{"id":"Qwen/Qwen2.5-7B-Instruct"}]}'
+//     -H 'X-Stacks-Signature: <sig>' -H 'X-Stacks-Public-Key: <pub>' -H 'X-Stacks-Timestamp: <ts>' \
+//     -H 'Content-Type: application/json' -d '{"models":[{"id":"Qwen/Qwen2.5-7B-Instruct"}]}'
 app.patch('/v1/providers/:id', async (c) => {
   const id = c.req.param('id');
   const provider = await directory.getProvider(c.env.DB, id);
@@ -684,7 +685,7 @@ app.patch('/v1/providers/:id', async (c) => {
 
   // prepareUpdate only reads known fields, so extra body keys can't be injected.
   const patch = body as directory.ProviderUpdate;
-  patch.allowLocal = (c.env.NETWORK || 'testnet') !== 'mainnet'; // override any client value
+  patch.allowLocal = c.env.ALLOW_LOCAL_ENDPOINTS === 'true'; // dev-only; deployed = https-only
   patch.network = toNetwork(c.env.NETWORK);
 
   let prepared;
