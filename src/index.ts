@@ -26,6 +26,9 @@ import { renderSkillMd } from './skill';
 type Env = {
   RECIPIENT_ADDRESS: string;
   NETWORK: string;
+  /** Dev-only ("true"): allow http://localhost provider endpoints (set in .dev.vars,
+   *  never in a deployed env). Deployed gateways are always https-only. */
+  ALLOW_LOCAL_ENDPOINTS?: string;
   RELAY_URL: string;
   /** D1 database holding the provider directory (providers + provider_keys). */
   DB: D1Database;
@@ -594,7 +597,7 @@ app.post('/v1/providers', async (c) => {
   if (badModel) return c.json({ error: badModel.error }, 400);
 
   // Validate + store (status pending). Allow http://localhost only off mainnet.
-  reg.allowLocal = (c.env.NETWORK || 'testnet') !== 'mainnet';
+  reg.allowLocal = c.env.ALLOW_LOCAL_ENDPOINTS === 'true'; // dev-only; deployed = https-only
   reg.network = toNetwork(c.env.NETWORK); // payoutAddress must match this network
   reg.payoutAddress = claimedPayout; // the signature-verified owner wins over any manifest value
   let provider;
@@ -682,7 +685,7 @@ app.patch('/v1/providers/:id', async (c) => {
 
   // prepareUpdate only reads known fields, so extra body keys can't be injected.
   const patch = body as directory.ProviderUpdate;
-  patch.allowLocal = (c.env.NETWORK || 'testnet') !== 'mainnet'; // override any client value
+  patch.allowLocal = c.env.ALLOW_LOCAL_ENDPOINTS === 'true'; // dev-only; deployed = https-only
   patch.network = toNetwork(c.env.NETWORK);
 
   let prepared;
