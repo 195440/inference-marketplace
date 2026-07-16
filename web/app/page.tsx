@@ -104,6 +104,14 @@ export default function Home() {
     return { total: providers.length, live: providers.filter((p) => p.status === "live").length, models: models.size };
   }, [providers]);
 
+  // Live providers float to the top; down ones sink to the bottom. Within a
+  // status group the gateway's order (registered_at) is preserved by the stable
+  // sort, so the list only reshuffles when a provider's health changes.
+  const sorted = useMemo(() => {
+    const rank: Record<string, number> = { live: 0, degraded: 1, pending: 2, down: 3 };
+    return [...providers].sort((a, b) => (rank[a.status] ?? 2) - (rank[b.status] ?? 2));
+  }, [providers]);
+
   return (
     <div className="min-h-screen overflow-x-hidden">
       <Toaster position="top-center" theme="dark" richColors />
@@ -199,7 +207,7 @@ export default function Home() {
           </div>
         ) : (
           <div className="space-y-3">
-            {providers.map((p) => {
+            {sorted.map((p) => {
               const st = STATUS[p.status] ?? STATUS.pending;
               return (
                 <button key={p.id} onClick={() => setDetail(p)} className="block w-full rounded-xl border border-[#23262d] bg-[#101216] p-4 text-left transition-colors hover:border-[#33373f]">
