@@ -8,7 +8,6 @@
  * model ids are real and callable right now.
  */
 
-import { MODELS, DEFAULT_MODEL } from './catalog';
 import type { Provider } from './directory';
 
 export interface SkillContext {
@@ -18,28 +17,36 @@ export interface SkillContext {
   defaultPricePerMTok: number;
 }
 
+/** First callable model id across live providers, for the example snippets. */
+function exampleModelId(providers: Provider[]): string {
+  for (const p of providers) {
+    if (p.status === 'down') continue;
+    const m = p.models[0];
+    if (m?.id) return m.id;
+  }
+  return 'Qwen/Qwen2.5-7B-Instruct';
+}
+
 function modelsTable(providers: Provider[]): string {
   const rows: string[] = [];
-  for (const m of MODELS) {
-    rows.push(`| \`${m.id}\` | house | ${m.tier} | ${m.contextLength.toLocaleString()} | live |`);
-  }
   for (const p of providers) {
     if (p.status === 'down') continue;
     for (const m of p.models) {
       const ctx = m.contextLength ? m.contextLength.toLocaleString() : '—';
-      rows.push(`| \`${m.id}\` | ${p.id} | community | ${ctx} | ${p.status} |`);
+      rows.push(`| \`${m.id}\` | ${p.id} | ${p.acceptedToken} | ${ctx} | ${p.status} |`);
     }
   }
+  if (!rows.length) rows.push('| _(no live providers yet — register one below)_ |  |  |  |  |');
   return [
-    '| Model | Provider | Source | Context | Status |',
-    '|-------|----------|--------|---------|--------|',
+    '| Model | Provider | Paid in | Context | Status |',
+    '|-------|----------|---------|---------|--------|',
     ...rows,
   ].join('\n');
 }
 
 export function renderSkillMd(ctx: SkillContext): string {
   const { origin, network, providers, defaultPricePerMTok } = ctx;
-  const example = DEFAULT_MODEL.id;
+  const example = exampleModelId(providers);
   // Payout address prefix follows the network: ST/SN on testnet, SP/SM on mainnet.
   const walletEx = network === 'mainnet' ? 'SP...' : 'ST...';
   const walletPrefixes = network === 'mainnet' ? '`SP…` / `SM…`' : '`ST…` / `SN…`';
@@ -94,10 +101,10 @@ To pay in a specific token, send \`X-PAYMENT-TOKEN-TYPE: sBTC\` (or \`USDCx\` / 
 ### Models
 ${modelsTable(providers)}
 
-\`house\` models are served by the marketplace's own upstream; \`community\` models
-are served by registered providers and settle directly to that provider's
-wallet. Both are callable by model id on \`/v1/chat/completions\`; a community
-model is also callable explicitly at \`POST ${origin}/v1/route/{providerId}/chat/completions\`.
+Every model is served by a registered provider and settles **directly to that
+provider's wallet**, in the token they chose (sBTC/USDCx) — the marketplace runs
+no models and takes no fee. Call by model id on \`/v1/chat/completions\`, or
+explicitly at \`POST ${origin}/v1/route/{providerId}/chat/completions\`.
 
 ---
 
@@ -107,9 +114,9 @@ You run an OpenAI-compatible endpoint (vLLM / HF Inference Endpoint / Ollama /
 SGLang / …). Register it; the marketplace verifies it is reachable **and**
 actually serving inference, then wraps it in x402 so clients pay **you** directly.
 
-**Fees — you keep 92%.** Registering and earning are free (no listing fee, no
-bond). Each paid request settles on-chain, non-custodial: **92% → your payout
-wallet**, **8% → the model's legion treasury**. The gateway never holds funds.
+**Fees — you keep 100%.** Registering and earning are free (no listing fee, no
+bond). Each paid request settles on-chain, non-custodial: **100% → your payout
+wallet**, in the token you chose (sBTC or USDCx). The gateway never holds funds.
 
 ### Don't have a model hosted yet?
 Any OpenAI-compatible server works (vLLM / Ollama / SGLang / HF Inference Endpoint).
@@ -164,10 +171,12 @@ curl -X POST ${origin}/v1/providers \\
     "name": "My node",
     "endpoint": "https://my-host/v1",
     "payoutAddress": "${walletEx}",
+    "acceptedToken": "sBTC",
     "models": ["Qwen/Qwen2.5-7B-Instruct"]
   }'
 \`\`\`
 - \`payoutAddress\` **must equal the signer's address** and be a ${network} address (${walletPrefixes}).
+- \`acceptedToken\` is the token you're paid in — \`"sBTC"\` or \`"USDCx"\` (optional, defaults to \`sBTC\`). Clients pay you directly in it.
 - \`models\` are **Hugging Face repo ids** — validated as real, text-generation, and commercially licensed (made-up / non-commercial ids rejected).
 - \`Timestamp\` must be within **300s** of now; each signature is **single-use** (replay-protected).
 - On success your node is verified, listed, and immediately callable.
@@ -234,7 +243,7 @@ How bad providers are handled, so you can trust the catalog:
 |--------|------|------|---------|
 | GET | \`/\` | free | Service + payment info |
 | GET | \`/skill.md\` | free | This document |
-| GET | \`/v1/models\` | free | Live catalog (house + community) |
+| GET | \`/v1/models\` | free | Live model catalog (every model from a registered provider) |
 | GET | \`/v1/providers\` | free | Registered providers + health + \`flagged\` status |
 | GET | \`/v1/schema\` | free | Provider registration JSON Schema |
 | POST | \`/v1/chat/completions\` | **paid** | OpenAI-compatible; price by model + tokens |

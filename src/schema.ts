@@ -10,6 +10,12 @@
 export const CAPABILITIES = ["chat", "tools", "vision", "reasoning", "embeddings"] as const;
 export type Capability = (typeof CAPABILITIES)[number];
 
+/** Payment tokens a provider can be paid in. Clients pay the provider directly
+ *  (non-custodial) in the provider's chosen token. */
+export const PAYOUT_TOKENS = ["sBTC", "USDCx"] as const;
+export type PayoutToken = (typeof PAYOUT_TOKENS)[number];
+export const DEFAULT_PAYOUT_TOKEN: PayoutToken = "sBTC";
+
 export interface ModelSpec {
   /** Marketplace model id agents request (e.g. "qwen2.5-7b"). */
   id: string;
@@ -28,6 +34,8 @@ export interface ProviderRegistration {
   payoutAddress: string;
   /** API contract the endpoint speaks. */
   api: "openai-chat";
+  /** Token this provider is paid in (default sBTC). */
+  acceptedToken?: PayoutToken;
   models: ModelSpec[];
   description?: string;
 }
@@ -53,6 +61,12 @@ export const REGISTRATION_SCHEMA = {
       description: "Stacks mainnet address that receives sBTC payment",
     },
     api: { type: "string", enum: ["openai-chat"], default: "openai-chat" },
+    acceptedToken: {
+      type: "string",
+      enum: [...PAYOUT_TOKENS],
+      default: DEFAULT_PAYOUT_TOKEN,
+      description: "Token you are paid in: sBTC or USDCx",
+    },
     description: { type: "string", maxLength: 280 },
     models: {
       type: "array",

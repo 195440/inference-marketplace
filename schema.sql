@@ -9,6 +9,10 @@ CREATE TABLE IF NOT EXISTS providers (
   endpoint      TEXT NOT NULL UNIQUE,
   api           TEXT NOT NULL DEFAULT 'openai-chat',
   payout_address TEXT NOT NULL,
+  -- Payment token this provider is paid in: 'sBTC' or 'USDCx'. Clients must pay
+  -- in this token (the 402 advertises only it). Existing DBs: run the ALTER below.
+  --   ALTER TABLE providers ADD COLUMN accepted_token TEXT NOT NULL DEFAULT 'sBTC';
+  accepted_token TEXT NOT NULL DEFAULT 'sBTC',
   description   TEXT,
   secured       INTEGER NOT NULL DEFAULT 0,
   status        TEXT NOT NULL DEFAULT 'pending',

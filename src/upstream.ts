@@ -25,23 +25,6 @@ export interface ChatCompletionBody {
   [k: string]: unknown;
 }
 
-export interface UpstreamResponse {
-  content: string;
-  model: string;
-  usage: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-}
-
-interface UpstreamAPIResponse {
-  id?: string;
-  model?: string;
-  choices?: Array<{ message?: { role?: string; content?: string }; finish_reason?: string }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-}
-
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/$/, '')}${path}`;
 }
@@ -72,43 +55,4 @@ export async function proxyChatCompletion(
 
   const json = await response.json().catch(() => ({ error: 'Invalid upstream response' }));
   return { status: response.status, json };
-}
-
-/** Simple single-prompt helper for the `/v1/chat` demo endpoint. */
-export async function callUpstream(
-  baseUrl: string,
-  apiKey: string,
-  request: { model: string; systemPrompt: string; userMessage: string; maxTokens?: number; temperature?: number },
-): Promise<UpstreamResponse> {
-  const { model, systemPrompt, userMessage, maxTokens = 1024, temperature = 0.7 } = request;
-
-  const response = await fetch(joinUrl(baseUrl, '/chat/completions'), {
-    method: 'POST',
-    headers: authHeaders(apiKey),
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-      max_tokens: maxTokens,
-      temperature,
-    }),
-  });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Upstream error: ${response.status} - ${error}`);
-  }
-
-  const data = (await response.json()) as UpstreamAPIResponse;
-  return {
-    content: data.choices?.[0]?.message?.content || '',
-    model: data.model || model,
-    usage: {
-      promptTokens: data.usage?.prompt_tokens ?? 0,
-      completionTokens: data.usage?.completion_tokens ?? 0,
-      totalTokens: data.usage?.total_tokens ?? 0,
-    },
-  };
 }

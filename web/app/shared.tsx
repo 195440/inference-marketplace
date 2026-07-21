@@ -19,6 +19,8 @@ export type Provider = {
   endpoint: string;
   api: string;
   payoutAddress: string;
+  /** Token this provider is paid in ('sBTC' or 'USDCx'). */
+  acceptedToken?: "sBTC" | "USDCx";
   models: ModelSpec[];
   description?: string;
   status: "live" | "degraded" | "down" | "pending";
@@ -59,7 +61,7 @@ function EndpointCard({ p, onChanged }: { p: Provider; onChanged: () => void }) 
   const [key, setKey] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [showProtect, setShowProtect] = useState(false);
-  const [form, setForm] = useState({ name: p.name, models: p.models.map((m) => m.id).join(", "), payoutAddress: p.payoutAddress, apiKey: "" });
+  const [form, setForm] = useState({ name: p.name, models: p.models.map((m) => m.id).join(", "), payoutAddress: p.payoutAddress, acceptedToken: p.acceptedToken ?? "sBTC", apiKey: "" });
   const secured = !!p.secured;
 
   // Sign with the payout wallet, then call the gateway.
@@ -91,6 +93,7 @@ function EndpointCard({ p, onChanged }: { p: Provider; onChanged: () => void }) 
       await callSigned("update", `/v1/providers/${p.id}`, "PATCH", {
         name: form.name.trim(),
         payoutAddress: form.payoutAddress.trim(),
+        acceptedToken: form.acceptedToken,
         models,
         ...(apiKey ? { apiKey } : {}),
       });
@@ -155,6 +158,10 @@ function EndpointCard({ p, onChanged }: { p: Provider; onChanged: () => void }) 
           <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Display name" className={inp} />
           <input value={form.models} onChange={(e) => setForm({ ...form, models: e.target.value })} placeholder="Model ids (comma-separated)" className={`mono ${inp} text-xs`} />
           <input value={form.payoutAddress} onChange={(e) => setForm({ ...form, payoutAddress: e.target.value })} placeholder="Payout address" className={`mono ${inp} text-xs`} />
+          <select value={form.acceptedToken} onChange={(e) => setForm({ ...form, acceptedToken: e.target.value as "sBTC" | "USDCx" })} className={inp} title="Token you're paid in">
+            <option value="sBTC">Paid in sBTC</option>
+            <option value="USDCx">Paid in USDCx</option>
+          </select>
           <input value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder={secured ? "Replace API key (optional)" : "API key to require (optional — locks this endpoint)"} className={`mono ${inp} text-xs`} />
           <button disabled={!!busy} className="rounded-lg bg-[#f7931a] px-3 py-1.5 text-xs font-medium text-[#1a1206] disabled:opacity-60">{busy === "edit" ? "Signing…" : "Sign & save"}</button>
         </form>
