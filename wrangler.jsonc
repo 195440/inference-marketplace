@@ -9,7 +9,7 @@
   // Requests matching a built asset are served directly; everything else runs
   // the Worker (so /v1/*, /health hit Hono).
   "assets": { "directory": "./web/out" },
-  // Default deploy = TESTNET (inference.aibtc.com). Legion fee-rail intentionally
+  // Default deploy = TESTNET (gateway.*.workers.dev); production = MAINNET (inference.aibtc.com). Legion fee-rail intentionally
   // OMITTED: with no LEGION_* set, settle() uses the direct x402 "exact" scheme —
   // non-custodial, 100% to the provider, in the provider's chosen token
   // (sBTC/USDCx). Re-add the LEGION_* block to bring back the 8% skim.
@@ -51,8 +51,9 @@
       "triggers": { "crons": ["*/5 * * * *"] }
     },
     "production": {
-      "name": "gateway",
+      "name": "inference-marketplace",
       "workers_dev": false,
+      "routes": [{ "pattern": "inference.aibtc.com", "custom_domain": true }],
       "assets": { "directory": "./web/out" },
       // Production = MAINNET, fee-free. No LEGION_* → settle() uses the direct
       // x402 "exact" scheme: non-custodial, 100% to the provider, in the token
