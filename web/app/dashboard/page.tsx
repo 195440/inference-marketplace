@@ -25,7 +25,7 @@ export default function Dashboard() {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    fetch(`${GATEWAY}/`).then((r) => r.json()).then((d) => { if (d?.network) setNetwork(String(d.network)); }).catch(() => { /* keep default */ });
+    fetch(`${GATEWAY}/health`).then((r) => r.json()).then((d) => { if (d?.network) setNetwork(String(d.network)); }).catch(() => { /* keep default */ });
   }, []);
 
   const mine = useMemo(
