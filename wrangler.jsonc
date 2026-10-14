@@ -20,6 +20,9 @@
     "STACKS_API": "https://api.testnet.hiro.so",
     "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
   },
+  // Gas sponsorship: x402-sponsor-relay's RelayRPC (same CF account). Sponsored
+  // payments settle through sponsorPayment — the public /settle never sponsors.
+  "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }],
   // Create with: wrangler kv namespace create PROVIDERS  → paste the id below.
   // PROVIDERS (KV) now holds only ephemeral data: wallet-auth replay nonces and
   // the legion stake cache. The provider directory lives in D1 (DB) below.
@@ -42,6 +45,7 @@
         "STACKS_API": "https://api.testnet.hiro.so",
         "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
       },
+      "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }],
       "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
       "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "58bab586-33b9-4036-83e8-c22f76379e3e" }],
       "triggers": { "crons": ["*/5 * * * *"] }
@@ -53,14 +57,14 @@
       // Production = MAINNET, fee-free. No LEGION_* → settle() uses the direct
       // x402 "exact" scheme: non-custodial, 100% to the provider, in the token
       // the provider chose (sBTC/USDCx; mainnet contracts in x402-middleware.ts).
-      // RECIPIENT_ADDRESS (mainnet house payout, SP…/SM…) is a SECRET, set with:
-      //   wrangler secret put RECIPIENT_ADDRESS --env production
+      // Gas is sponsored by the mainnet relay over the X402_RELAY binding below.
       "vars": {
         "NETWORK": "mainnet",
         "RELAY_URL": "https://x402-relay.aibtc.com",
         "PRICE_MARKUP": "1.5",
         "STACKS_API": "https://api.hiro.so"
       },
+      "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-production", "entrypoint": "RelayRPC" }],
       "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
       // Fresh MAINNET D1 (created 2026-07-21) — keeps mainnet providers isolated
       // from the shared testnet directory (testnet ST… rows are unpayable on
