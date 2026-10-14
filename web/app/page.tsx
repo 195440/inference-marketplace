@@ -80,7 +80,7 @@ export default function Home() {
   // Network (testnet/mainnet) comes from the gateway so the badge can never
   // drift from what the gateway is actually settling on.
   useEffect(() => {
-    fetch(`${GATEWAY}/`)
+    fetch(`${GATEWAY}/health`)
       .then((r) => r.json())
       .then((d) => { if (d?.network) setNetwork(String(d.network)); })
       .catch(() => { /* keep default */ });
