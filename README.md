@@ -140,13 +140,14 @@ wrangler login
 # create + migrate the directory DB, then paste its id into wrangler.jsonc
 wrangler d1 create inference-db-mainnet
 wrangler d1 execute inference-db-mainnet --remote --file=schema.sql
-npm run deploy:staging       # testnet
-npm run deploy:production    # mainnet
+npm run deploy:testnet       # testnet (gateway.*.workers.dev)
+npm run deploy:staging       # testnet (gateway-staging)
+npm run deploy:production    # mainnet (inference.aibtc.com) — also what a push to main deploys
 ```
 
 ## Networks
 
 | Env | NETWORK | Relay |
 |-----|---------|-------|
-| dev / staging | testnet | `https://x402-relay.aibtc.dev` |
-| production | mainnet | `https://x402-relay.aibtc.com` |
+| default (production) | mainnet | `https://x402-relay.aibtc.com` |
+| `testnet` / `staging` / dev | testnet | `https://x402-relay.aibtc.dev` |

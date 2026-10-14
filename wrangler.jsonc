@@ -1,43 +1,66 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "gateway",
+  // Top level = PRODUCTION / MAINNET (inference.aibtc.com). Cloudflare's Git
+  // integration runs a plain `wrangler deploy` on every push to main, so the
+  // default config must be the live one. Testnet lives in env.testnet / env.staging.
+  "name": "inference-marketplace",
   "main": "src/index.ts",
   "compatibility_date": "2026-01-14",
   "compatibility_flags": ["nodejs_compat_v2"],
-  "workers_dev": true,
+  "workers_dev": false,
+  "routes": [{ "pattern": "inference.aibtc.com", "custom_domain": true }],
   // The Worker serves the static dashboard (web/out) AND the /v1/* API.
   // Requests matching a built asset are served directly; everything else runs
   // the Worker (so /v1/*, /health hit Hono).
   "assets": { "directory": "./web/out" },
-  // Default deploy = TESTNET (inference.aibtc.com). Legion fee-rail intentionally
-  // OMITTED: with no LEGION_* set, settle() uses the direct x402 "exact" scheme —
-  // non-custodial, 100% to the provider, in the provider's chosen token
-  // (sBTC/USDCx). Re-add the LEGION_* block to bring back the 8% skim.
+  // Fee-free: Legion fee-rail intentionally OMITTED. With no LEGION_* set,
+  // settle() uses the direct x402 "exact" scheme — non-custodial, 100% to the
+  // provider, in the token the provider chose (sBTC/USDCx; contracts in
+  // x402-middleware.ts). Re-add the LEGION_* block to bring back the 8% skim.
   "vars": {
-    "NETWORK": "testnet",
-    "RELAY_URL": "https://x402-relay.aibtc.dev",
+    "NETWORK": "mainnet",
+    "RELAY_URL": "https://x402-relay.aibtc.com",
     "PRICE_MARKUP": "1.5",
-    "STACKS_API": "https://api.testnet.hiro.so",
-    "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
+    "STACKS_API": "https://api.hiro.so"
   },
   // Gas sponsorship: x402-sponsor-relay's RelayRPC (same CF account). Sponsored
   // payments settle through sponsorPayment — the public /settle never sponsors.
-  "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }],
-  // Create with: wrangler kv namespace create PROVIDERS  → paste the id below.
-  // PROVIDERS (KV) now holds only ephemeral data: wallet-auth replay nonces and
-  // the legion stake cache. The provider directory lives in D1 (DB) below.
+  "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-production", "entrypoint": "RelayRPC" }],
+  // PROVIDERS (KV) holds only ephemeral data: wallet-auth replay nonces and the
+  // legion stake cache. The provider directory lives in D1 (DB) below.
   "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
-  // Provider directory (D1: inference-db, region APAC). Local `wrangler dev` uses a
-  // local SQLite keyed by the binding; --remote / deploy use this database_id.
-  "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "58bab586-33b9-4036-83e8-c22f76379e3e" }],
+  // MAINNET D1 (created 2026-07-21) — isolated from the testnet directory
+  // (testnet ST… rows are unpayable on mainnet). Schema applied via
+  // `wrangler d1 execute inference-db-mainnet --remote --file=schema.sql`.
+  "d1_databases": [{ "binding": "DB", "database_name": "inference-db-mainnet", "database_id": "81a777bf-fd21-49f9-9b4c-241cc5eb3f83" }],
   // Continuous provider health monitoring.
   "triggers": { "crons": ["*/5 * * * *"] },
   "env": {
+    // TESTNET (gateway.*.workers.dev). Also the target for local `npm run dev`.
+    "testnet": {
+      "name": "gateway",
+      "workers_dev": true,
+      "routes": [],
+      "assets": { "directory": "./web/out" },
+      "vars": {
+        "NETWORK": "testnet",
+        "RELAY_URL": "https://x402-relay.aibtc.dev",
+        "PRICE_MARKUP": "1.5",
+        "STACKS_API": "https://api.testnet.hiro.so",
+        "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
+      },
+      "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }],
+      "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
+      // Testnet provider directory (D1: inference-db, region APAC).
+      "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "58bab586-33b9-4036-83e8-c22f76379e3e" }],
+      "triggers": { "crons": ["*/5 * * * *"] }
+    },
+    // Staging = TESTNET on its own worker.
     "staging": {
       "name": "gateway-staging",
       "workers_dev": true,
+      "routes": [],
       "assets": { "directory": "./web/out" },
-      // Staging = TESTNET, fee-free (no LEGION_* → direct non-custodial settle).
       "vars": {
         "NETWORK": "testnet",
         "RELAY_URL": "https://x402-relay.aibtc.dev",
@@ -48,28 +71,6 @@
       "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }],
       "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
       "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "58bab586-33b9-4036-83e8-c22f76379e3e" }],
-      "triggers": { "crons": ["*/5 * * * *"] }
-    },
-    "production": {
-      "name": "gateway",
-      "workers_dev": false,
-      "assets": { "directory": "./web/out" },
-      // Production = MAINNET, fee-free. No LEGION_* → settle() uses the direct
-      // x402 "exact" scheme: non-custodial, 100% to the provider, in the token
-      // the provider chose (sBTC/USDCx; mainnet contracts in x402-middleware.ts).
-      // Gas is sponsored by the mainnet relay over the X402_RELAY binding below.
-      "vars": {
-        "NETWORK": "mainnet",
-        "RELAY_URL": "https://x402-relay.aibtc.com",
-        "PRICE_MARKUP": "1.5",
-        "STACKS_API": "https://api.hiro.so"
-      },
-      "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-production", "entrypoint": "RelayRPC" }],
-      "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
-      // Fresh MAINNET D1 (created 2026-07-21) — keeps mainnet providers isolated
-      // from the shared testnet directory (testnet ST… rows are unpayable on
-      // mainnet). Schema applied via `wrangler d1 execute … --remote --file=schema.sql`.
-      "d1_databases": [{ "binding": "DB", "database_name": "inference-db-mainnet", "database_id": "81a777bf-fd21-49f9-9b4c-241cc5eb3f83" }],
       "triggers": { "crons": ["*/5 * * * *"] }
     }
   }
