@@ -8,10 +8,8 @@ import type { Context, Next } from 'hono';
 import { cors } from 'hono/cors';
 import { x402Middleware, x402DynamicMiddleware } from './x402-middleware';
 import type { X402Context, TokenType } from './x402-middleware';
-import { callUpstream, proxyChatCompletion } from './upstream';
+import { proxyChatCompletion } from './upstream';
 import type { ChatCompletionBody } from './upstream';
-import { getModel, MODELS, DEFAULT_MODEL } from './catalog';
-import { getProvider } from './registry';
 import * as directory from './directory';
 import { rankByStake } from './legion';
 import { legionForModel } from './model-legions';
@@ -19,30 +17,22 @@ import { checkEndpoint, verifyProvider } from './health';
 import { REGISTRATION_SCHEMA } from './schema';
 import { validateHfModel } from './hf';
 import { recoverWalletAuth, toNetwork, AUTH_SKEW_SECONDS, type AuthAction } from './wallet-auth';
-import { quotePrice, realizedCostUsd, estimateTokens, usdToBaseUnits, getBtcUsd } from './pricing';
-import type { Quote } from './pricing';
+import { estimateTokens, usdToBaseUnits, getBtcUsd } from './pricing';
 import { renderSkillMd } from './skill';
 
 type Env = {
-  RECIPIENT_ADDRESS: string;
   NETWORK: string;
   /** Dev-only ("true"): allow http://localhost provider endpoints (set in .dev.vars,
    *  never in a deployed env). Deployed gateways are always https-only. */
   ALLOW_LOCAL_ENDPOINTS?: string;
   RELAY_URL: string;
+  /** Service binding to x402-sponsor-relay's RelayRPC. When set, the 402 advertises
+   *  `extra.sponsored` and sponsored txs settle via sponsorPayment (relay pays gas). */
+  X402_RELAY?: Fetcher;
   /** D1 database holding the provider directory (providers + provider_keys). */
   DB: D1Database;
   /** KV namespace for ephemeral data: wallet-auth replay nonces + legion stake cache. */
   PROVIDERS: KVNamespace;
-  /** Base URL of the OpenAI-compatible upstream (HF Inference Endpoint / vLLM). */
-  UPSTREAM_BASE_URL: string;
-  /** Bearer token for the upstream (HF token / vLLM api-key). */
-  UPSTREAM_API_KEY: string;
-  /** Optional: force the model name sent upstream (single-model endpoints like
-   *  an HF Inference Endpoint or Ollama serve one model under their own id). */
-  UPSTREAM_MODEL?: string;
-  /** Multiple of serving cost charged to the agent. Default 1.5 (50% margin). */
-  PRICE_MARKUP?: string;
   /** DEV-ONLY: 'true' bypasses payment on non-mainnet (see x402-middleware). */
   SKIP_PAYMENT?: string;
   /** Owner address of the per-model legions (e.g. "STGX5YP…"). Each model family
@@ -65,14 +55,13 @@ type Env = {
 };
 
 /** Where a /v1/chat/completions request was resolved to, decided in the pricing
- *  middleware and consumed by the handler after settlement. */
-type CompletionRoute =
-  | { kind: 'house' }
-  | { kind: 'community'; providerId: string; modelId: string };
+ *  middleware and consumed by the handler after settlement. Every model is
+ *  served by a registered (community) provider — the marketplace runs no models
+ *  of its own. */
+type CompletionRoute = { kind: 'community'; providerId: string; modelId: string };
 
 type Variables = {
   x402?: X402Context;
-  quote?: Quote;
   route?: CompletionRoute;
   /** Per-model legion (fees/treasury/gov) resolved for fee routing. */
   legion?: import('./model-legions').ModelLegion;
@@ -80,11 +69,6 @@ type Variables = {
 
 /** Default per-token rate for a registered provider that declares none. */
 const DEFAULT_PRICE_PER_MTOK_USD = 0.20;
-
-function markupFrom(env: Env): number | undefined {
-  const m = Number(env.PRICE_MARKUP);
-  return Number.isFinite(m) && m > 0 ? m : undefined;
-}
 
 /** A fresh shared secret (48 hex chars) — the gateway's upstream-routing credential. */
 function genSharedKey(): string {
@@ -191,28 +175,9 @@ app.use('*', cors({
   exposeHeaders: ['payment-required', 'payment-response', 'X-PAYER-ADDRESS'],
 }));
 
-// Fail fast on the paid endpoints if required secrets are missing. Free
-// discovery routes (info, health, catalog, providers) stay available.
-app.use('/v1/chat', requireSecrets);
-app.use('/v1/chat/*', requireSecrets);
-
-async function requireSecrets(
-  c: Context<{ Bindings: Env; Variables: Variables }>,
-  next: Next,
-) {
-  const missing: string[] = [];
-  if (!c.env.RECIPIENT_ADDRESS) missing.push('RECIPIENT_ADDRESS');
-  if (!c.env.UPSTREAM_BASE_URL) missing.push('UPSTREAM_BASE_URL');
-  if (!c.env.UPSTREAM_API_KEY) missing.push('UPSTREAM_API_KEY');
-  if (missing.length) {
-    return c.json({
-      error: 'Server configuration error',
-      message: `Missing required config: ${missing.join(', ')}`,
-      hint: missing.map((s) => `wrangler secret put ${s}`).join(' && '),
-    }, 503);
-  }
-  await next();
-}
+// Every paid route settles directly to a registered provider (non-custodial),
+// so the gateway holds no serving secrets. Discovery routes (info, health,
+// catalog, providers) are always available.
 
 // ---------------------------------------------------------------------------
 // Discovery (free)
@@ -233,10 +198,9 @@ app.get('/', (c) => {
       flow: 'Request -> 402 requirements -> sign (no broadcast) -> retry with X-PAYMENT -> settle via relay -> inference',
     },
     fees: {
-      providerShare: '92%',
-      marketplaceFee: '8%',
-      routedTo: "the model's legion treasury via legion-fees.route",
-      custody: 'non-custodial — provider is paid on-chain directly to its payout wallet; the gateway never holds funds',
+      providerShare: '100%',
+      marketplaceFee: '0%',
+      custody: 'non-custodial — the client pays the provider on-chain directly, in the provider\'s chosen token (sBTC/USDCx), to its payout wallet; the gateway never holds funds',
       toEarn: 'free — no listing fee, no bond required to register or earn',
     },
     endpoints: {
@@ -244,8 +208,8 @@ app.get('/', (c) => {
       models: 'GET /v1/models',
       providers: 'GET /v1/providers',
       chatCompletions: 'POST /v1/chat/completions  (OpenAI-compatible, dynamic price by model)',
-      chat: 'POST /v1/chat  (simple prompt, cheap tier)',
-      registerProvider: 'POST /v1/providers  (Phase 2)',
+      routeToProvider: 'POST /v1/route/{id}/chat/completions  (call a specific provider; settles to them)',
+      registerProvider: 'POST /v1/providers',
       updateProvider: 'PATCH /v1/providers/{id}  (self-service; Authorization: Bearer <shared key>)',
       flagProvider: 'POST /v1/providers/{id}/flag  (operator only, admin token)',
       feedback: 'POST /v1/feedback  (Phase 3, reputation)',
@@ -283,41 +247,12 @@ app.get('/skill.md', async (c) => {
 // reference 1k-output-token call so callers can compare; the real charge is
 // quoted per request from the actual prompt + max_tokens.
 app.get('/v1/models', async (c) => {
-  const markup = markupFrom(c.env);
-  const data = await Promise.all(
-    MODELS.map(async (m) => {
-      const q = await quotePrice({
-        modelId: m.id,
-        costPer1kUsd: m.costPer1kUsd,
-        promptText: '',
-        maxTokens: 1000,
-        tokenType: 'sBTC',
-        markup,
-      });
-      return {
-        id: m.id,
-        name: m.name,
-        tier: m.tier,
-        contextLength: m.contextLength,
-        providerId: m.providerId,
-        source: 'house',
-        bestFor: m.bestFor,
-        // reference price for ~1k output tokens
-        referencePrice: {
-          usd: Number(q.priceUsd.toFixed(6)),
-          sats: q.amount,
-          markup: q.markup,
-          btcUsd: q.btcUsd,
-        },
-      };
-    }),
-  );
-
-  // Community models — every live registered provider's declared models, priced
-  // at their per-token rate. Callable via /v1/chat/completions (model id) or
-  // the explicit /v1/route/:id proxy; payment settles to the provider directly.
-  // Exclude flagged + down providers, then rank by stake so higher-staked
-  // providers list first (staking buys ranking; it is never required to earn).
+  // Every model is served by a live registered provider, priced at that
+  // provider's per-token rate. Callable via /v1/chat/completions (model id) or
+  // the explicit /v1/route/:id proxy; payment settles to the provider directly,
+  // in the provider's chosen token. Exclude flagged + down providers, then rank
+  // by stake so higher-staked providers list first (staking buys ranking; it is
+  // never required to earn).
   const liveProviders = (await directory.listProviders(c.env.DB)).filter((p) => p.status !== 'down' && !p.flagged);
   const providers = await rankByStake(c.env, liveProviders);
   const btcUsd = await getBtcUsd();
@@ -333,13 +268,14 @@ app.get('/v1/models', async (c) => {
         providerId: p.id,
         source: 'community',
         status: p.status,
+        acceptedToken: p.acceptedToken,
         route: `/v1/route/${p.id}/chat/completions`,
         referencePrice: { usd: Number(usd.toFixed(6)), sats: await usdToBaseUnits(usd, 'sBTC'), btcUsd },
       });
     }
   }
 
-  return c.json({ object: 'list', pricedFor: '1000 output tokens', data: [...data, ...community] });
+  return c.json({ object: 'list', pricedFor: '1000 output tokens', data: community });
 });
 
 // Provider directory (supply side) — external providers registered via the UI.
@@ -354,11 +290,11 @@ app.get('/v1/providers', async (c) => {
 
 /**
  * OpenAI-compatible chat completions. Price is resolved dynamically from the
- * requested `model` and chosen payment token, then settled before we route the
- * request to the model's provider.
+ * requested `model` and the serving provider's chosen token, then settled
+ * (directly to that provider) before we forward the request.
  */
 app.post('/v1/chat/completions',
-  x402DynamicMiddleware(async (c, tokenType: TokenType) => {
+  x402DynamicMiddleware(async (c, _tokenType: TokenType) => {
     let body: ChatCompletionBody;
     try {
       body = await c.req.json<ChatCompletionBody>();
@@ -366,37 +302,10 @@ app.post('/v1/chat/completions',
       return c.json({ error: 'Invalid JSON body' }, 400);
     }
 
-    // 1) House catalog model — priced by serving cost × markup, paid to the house.
-    const houseModel = getModel(body.model);
-    if (houseModel) {
-      const quote = await quotePrice({
-        modelId: houseModel.id,
-        costPer1kUsd: houseModel.costPer1kUsd,
-        promptText: promptTextOf(body),
-        maxTokens: body.max_tokens ?? 1024,
-        tokenType,
-        markup: markupFrom(c.env),
-      });
-      c.set('quote', quote);
-      c.set('route', { kind: 'house' });
-      // route this model's 8% skim to its model legion (qwen2.5-* -> qwen legion, …)
-      c.set('legion', legionForModel(c.env, houseModel.id) ?? undefined);
-      return {
-        amount: quote.amount,
-        tokenType,
-        extra: {
-          pricing: {
-            type: 'dynamic',
-            estimate: { model: houseModel.id, estimatedCostUsd: quote.priceUsd.toFixed(6) },
-          },
-        },
-      };
-    }
-
-    // 2) Community model — served by a registered provider. The client pays the
-    //    provider directly (non-custodial) at the provider's declared rate.
-    //    Exclude flagged providers, then pick the highest-staked one for the model
-    //    (staking buys ranking; it is never required to earn).
+    // Every model is served by a registered provider. The client pays the
+    // provider directly (non-custodial) at the provider's declared rate, in the
+    // token the provider chose. Exclude flagged providers, then pick the
+    // highest-staked one for the model (staking buys ranking; never required).
     const providers = await directory.listProviders(c.env.DB);
     const candidates = providers.filter(
       (p) => p.status === 'live' && !p.flagged && p.models.some((m) => m.id === body.model),
@@ -409,16 +318,19 @@ app.post('/v1/chat/completions',
         hint: 'GET /v1/models for the catalog',
       }, 400);
     }
+    // The provider chose the token it's paid in — advertise only that one, so the
+    // client pays the provider directly in sBTC or USDCx as declared.
+    const payToken = provider.acceptedToken;
     const pricePerMTok = model.pricePerMTokenUsd ?? DEFAULT_PRICE_PER_MTOK_USD;
     const estTokens = estimateTokens(promptTextOf(body)) + (body.max_tokens ?? 512);
     const usd = (estTokens / 1_000_000) * pricePerMTok;
-    const amount = await usdToBaseUnits(usd, tokenType);
+    const amount = await usdToBaseUnits(usd, payToken);
     c.set('route', { kind: 'community', providerId: provider.id, modelId: model.id });
     // route this model's 8% skim to its model legion
     c.set('legion', legionForModel(c.env, model.id) ?? undefined);
     return {
       amount,
-      tokenType,
+      tokenType: payToken,
       payTo: provider.payoutAddress,
       extra: { pricing: { type: 'dynamic', estimate: { model: model.id, provider: provider.id, estimatedCostUsd: usd.toFixed(6) } } },
     };
@@ -427,85 +339,16 @@ app.post('/v1/chat/completions',
     const payment = c.get('x402');
     const body = await c.req.json<ChatCompletionBody>();
     const route = c.get('route');
-
-    // Community provider -> forward to their endpoint (already paid to them).
-    if (route?.kind === 'community') {
-      const provider = await directory.getProvider(c.env.DB, route.providerId);
-      if (!provider || provider.status === 'down' || provider.flagged) {
-        return c.json({ error: `No live provider for model ${body.model}` }, 503);
-      }
-      return routeToProvider(c, provider, body, payment);
+    if (route?.kind !== 'community') {
+      return c.json({ error: `No live provider for model ${body.model}` }, 503);
     }
 
-    // House provider -> our OpenAI-compatible upstream (HF endpoint / vLLM).
-    const model = getModel(body.model)!; // validated in middleware
-    const provider = getProvider(model.providerId);
-    if (!provider || provider.status !== 'live') {
-      return c.json({ error: `No live provider for model ${model.id}` }, 503);
+    // Forward to the provider's endpoint (payment already settled to them).
+    const provider = await directory.getProvider(c.env.DB, route.providerId);
+    if (!provider || provider.status === 'down' || provider.flagged) {
+      return c.json({ error: `No live provider for model ${body.model}` }, 503);
     }
-
-    const upstream = await proxyChatCompletion(
-      c.env.UPSTREAM_BASE_URL,
-      c.env.UPSTREAM_API_KEY,
-      { ...body, model: c.env.UPSTREAM_MODEL || model.upstreamModel },
-    );
-    const quote = c.get('quote');
-
-    const upstreamObj = (typeof upstream.json === 'object' && upstream.json) ? upstream.json as Record<string, unknown> : {};
-    const usage = upstreamObj.usage as { total_tokens?: number } | undefined;
-    // Self-hosted upstreams report tokens, not a dollar cost — derive it.
-    const servingCostUsd = usage?.total_tokens != null
-      ? Number(realizedCostUsd(usage.total_tokens, model.costPer1kUsd).toFixed(6))
-      : null;
-
-    return c.json({
-      ...upstreamObj,
-      _marketplace: {
-        model: model.id,
-        tier: model.tier,
-        provider: provider.id,
-        // What the agent paid us — the dynamic quote (cost x markup, live rate).
-        pricePaid: quote && {
-          amount: quote.amount,
-          tokenType: quote.tokenType,
-          priceUsd: Number(quote.priceUsd.toFixed(6)),
-          markup: quote.markup,
-          btcUsd: quote.btcUsd,
-        },
-        // What this call cost the house to serve (tokens x costPer1kUsd).
-        // pricePaid.priceUsd - servingCostUsd ~= realized margin on this call.
-        servingCostUsd,
-        tokens: usage?.total_tokens ?? null,
-        payment: { txId: payment?.settleResult?.transaction, payer: payment?.payerAddress },
-      },
-    }, upstream.status as 200);
-  },
-);
-
-// Simple prompt endpoint for quick demos — fixed price, default model.
-app.post('/v1/chat',
-  x402Middleware({ amount: '1000', tokenType: 'sBTC' }),
-  async (c) => {
-    const payment = c.get('x402');
-    const body = await c.req.json<{ prompt?: string; message?: string; text?: string }>();
-    const userInput = body.prompt || body.message || body.text || '';
-    if (!userInput) {
-      return c.json({ error: 'Missing required field: prompt, message, or text' }, 400);
-    }
-
-    const result = await callUpstream(c.env.UPSTREAM_BASE_URL, c.env.UPSTREAM_API_KEY, {
-      model: c.env.UPSTREAM_MODEL || DEFAULT_MODEL.upstreamModel,
-      systemPrompt: 'You are a helpful AI assistant.',
-      userMessage: userInput,
-    });
-
-    return c.json({
-      result: result.content,
-      model: DEFAULT_MODEL.id,
-      usage: result.usage,
-      pricePaid: { amount: '1000', tokenType: 'sBTC' },
-      payment: { txId: payment?.settleResult?.transaction, sender: payment?.payerAddress },
-    });
+    return routeToProvider(c, provider, body, payment);
   },
 );
 
@@ -858,15 +701,17 @@ app.post('/v1/route/:id/chat/completions',
     if (!model) return c.json({ error: 'Provider serves no models' }, 400);
 
     // Price = provider's declared per-token rate × estimated tokens. The client
-    // pays the provider directly; the marketplace takes no custody.
+    // pays the provider directly, in the token the provider chose (sBTC/USDCx);
+    // the marketplace takes no custody.
+    const payToken = provider.acceptedToken;
     const pricePerMTok = model.pricePerMTokenUsd ?? DEFAULT_PRICE_PER_MTOK_USD;
     const estTokens = estimateTokens(promptTextOf(body)) + (body.max_tokens ?? 512);
     const usd = (estTokens / 1_000_000) * pricePerMTok;
-    const amount = await usdToBaseUnits(usd, tokenType);
+    const amount = await usdToBaseUnits(usd, payToken);
 
     return {
       amount,
-      tokenType,
+      tokenType: payToken,
       payTo: provider.payoutAddress,
       extra: { pricing: { type: 'dynamic', estimate: { model: model.id, provider: provider.id, estimatedCostUsd: usd.toFixed(6) } } },
     };

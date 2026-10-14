@@ -25,6 +25,7 @@ import type {
   PaymentPayloadV2,
   SettlementResponseV2,
 } from 'x402-stacks';
+import { deserializeTransaction, AuthType } from '@stacks/transactions';
 
 export type TokenType = 'STX' | 'sBTC' | 'USDCx';
 
@@ -60,6 +61,28 @@ const TOKEN_CONTRACTS: Record<'mainnet' | 'testnet', Record<'sBTC' | 'USDCx', To
     USDCx: { address: 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM', name: 'usdcx' },
   },
 };
+
+/** RelayRPC.sponsorPayment() over the `X402_RELAY` service binding (x402-sponsor-relay). */
+type SponsorPaymentResult =
+  | { success: true; txid: string; payer: string; fee: string }
+  | { success: false; code: string; error: string; retryable: boolean };
+
+interface SponsorRelay {
+  sponsorPayment(
+    txHex: string,
+    settle: { expectedRecipient: string; minAmount: string; tokenType?: TokenType; resource?: string; method?: string },
+  ): Promise<SponsorPaymentResult>;
+}
+
+/** True when the tx was built with `sponsored: true` (sponsor slot left for the relay). */
+function isSponsoredTx(txHex: string | undefined): boolean {
+  if (!txHex) return false;
+  try {
+    return deserializeTransaction(txHex.replace(/^0x/, '')).auth.authType === AuthType.Sponsored;
+  } catch {
+    return false;
+  }
+}
 
 // Bindings are `any` so these helpers compose with any app Env.
 type Ctx = Context<{ Bindings: any; Variables: { x402?: X402Context; quote?: unknown; route?: unknown; legion?: { fees?: string; treasury?: string; gov?: string } } }>;
@@ -309,8 +332,12 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
     asset: getAssetV2(tokenType, network),
     payTo: recipient,
     maxTimeoutSeconds: 300,
-    ...(config.extra ? { extra: config.extra } : {}),
   };
+  // Advertise gas sponsorship when the relay's service binding is wired: clients
+  // may then sign with `sponsored: true, fee: 0` and the relay pays the STX fee.
+  const relay: SponsorRelay | undefined = env.X402_RELAY;
+  const extra = { ...(config.extra ?? {}), ...(relay ? { sponsored: true } : {}) };
+  if (Object.keys(extra).length) paymentRequirements.extra = extra;
 
   const sig = c.req.header(X402_HEADERS.PAYMENT_SIGNATURE);
 
@@ -330,15 +357,48 @@ async function settle(c: Ctx, config: X402Config): Promise<Response | null> {
   }
 
   let settleResult: SettlementResponseV2;
-  try {
-    const verifier = new X402PaymentVerifier(relayUrl);
-    settleResult = await verifier.settle(payload, { paymentRequirements });
-  } catch (error) {
-    return c.json({
-      error: 'Settlement relay error',
-      code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
-      details: String(error),
-    }, 502);
+  if (relay && isSponsoredTx(payload.payload?.transaction)) {
+    // Sponsored tx → the relay co-signs, pays the fee and broadcasts (binding-only;
+    // the public /settle refuses an empty sponsor slot). Self-paid txs fall through.
+    let sponsored: SponsorPaymentResult;
+    try {
+      sponsored = await relay.sponsorPayment(payload.payload.transaction, {
+        expectedRecipient: recipient,
+        minAmount: config.amount,
+        tokenType,
+        resource: c.req.path,
+        method: c.req.method,
+      });
+    } catch (error) {
+      return c.json({
+        error: 'Settlement relay error',
+        code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+        details: String(error),
+      }, 502);
+    }
+    if (!sponsored.success) {
+      return c.json({
+        error: 'Payment settlement failed',
+        code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+        reason: sponsored.code,
+        details: sponsored.error,
+        retryable: sponsored.retryable,
+        asset: paymentRequirements.asset,
+        network: networkV2,
+      }, sponsored.retryable ? 503 : 402);
+    }
+    settleResult = { success: true, transaction: sponsored.txid, network: networkV2, payer: sponsored.payer };
+  } else {
+    try {
+      const verifier = new X402PaymentVerifier(relayUrl);
+      settleResult = await verifier.settle(payload, { paymentRequirements });
+    } catch (error) {
+      return c.json({
+        error: 'Settlement relay error',
+        code: X402_ERROR_CODES.UNEXPECTED_SETTLE_ERROR,
+        details: String(error),
+      }, 502);
+    }
   }
 
   if (!settleResult.success) {

@@ -1,56 +1,48 @@
 # AIBTC Inference Marketplace — Gateway
 
-Pay-per-request AI inference, settled in **sBTC / USDCx** on Stacks. An agent
-pays for a single inference call by signing a token transfer (x402); the AIBTC
-relay verifies it; the gateway routes the request to an **open-weight model it
-serves itself** and returns the completion.
+Pay-per-request AI inference, settled in **sBTC / USDCx** on Stacks. Anyone can
+register their own OpenAI-compatible model endpoint; an agent pays for a single
+call by signing a token transfer (x402); the AIBTC relay verifies it; the gateway
+forwards the request to that provider and returns the completion.
 
-> **Not an OpenRouter reseller.** Reselling a third-party API violates their
-> terms (OpenRouter §7.4). Instead the gateway is a *real provider*: it serves
-> open-weight models (Qwen, Llama, Mistral, DeepSeek) from its own
-> OpenAI-compatible upstream — a **Hugging Face Inference Endpoint** or **vLLM**
-> server. Serving open weights commercially is permitted by their licenses.
+**The marketplace runs no models of its own and takes no fee.** It is a directory
++ x402 paywall + trust layer. Payment settles **directly to the provider**
+(non-custodial) — the gateway never holds funds. Each provider picks the token it
+is paid in (**sBTC** or **USDCx**).
 
 ```
 agent ──(1) request──────────────▶ gateway
-agent ◀─(2) 402 + price/contract── gateway     price = serving_cost × markup → live sBTC
+agent ◀─(2) 402 + price/payTo───── gateway     payTo = the provider's wallet
 agent ──(3) sign transfer (no broadcast)
 agent ──(4) retry w/ X-PAYMENT───▶ gateway ──settle──▶ x402 relay ──▶ Stacks
-                                   gateway ──inference─▶ upstream (HF / vLLM, open model)
+                                   gateway ──inference─▶ provider's endpoint
 agent ◀─(5) completion + receipt── gateway
 ```
 
-## Roadmap
+## Supply side
 
-| Phase | What | Status |
-|------:|------|--------|
-| **1** | You serve open models for sBTC/USDCx; AIBTC bridges Bitcoin↔inference | ✅ this repo |
-| **2** | Open the supply side — anyone registers as a provider, gets paid in sBTC | 🔌 `POST /v1/providers`, `registry.ts` |
-| **3** | Full marketplace — agents pick by reputation + price | 🔌 `POST /v1/feedback`, ERC-8004 `reputation_*` |
-
-## Quick start
-
-```bash
-npm install
-# .dev.vars: set RECIPIENT_ADDRESS, UPSTREAM_BASE_URL, UPSTREAM_API_KEY
-npm run dev          # http://localhost:8787
-```
-
-No cloud GPU? Serve a model locally with Ollama (OpenAI-compatible):
-```bash
-ollama serve & ollama pull qwen2.5:7b
-# UPSTREAM_BASE_URL=http://localhost:11434/v1  UPSTREAM_API_KEY=ollama  UPSTREAM_MODEL=qwen2.5:7b
-```
+A provider registers an OpenAI-compatible endpoint (vLLM / HF Inference Endpoint /
+Ollama / SGLang / …) with a wallet-signed request. The gateway verifies the
+endpoint is reachable and actually serving inference, checks the model ids against
+Hugging Face (real, text-generation, commercially licensed), then lists it. From
+then on clients can call it by model id and pay per request — **100% to the
+provider's payout wallet**, in the provider's chosen token.
 
 ## Configuration
 
+Non-secret config lives in `wrangler.jsonc`; there are no required secrets for the
+marketplace itself (payment settles to each provider, so the gateway holds none).
+
 | Name | Required | Purpose |
 |------|----------|---------|
-| `RECIPIENT_ADDRESS` | ✅ | Stacks address that receives payment |
-| `UPSTREAM_BASE_URL` | ✅ | OpenAI-compatible upstream (HF Endpoint / vLLM), e.g. `https://xxxx.endpoints.huggingface.cloud/v1` |
-| `UPSTREAM_API_KEY` | ✅ | Bearer token for the upstream |
-| `PRICE_MARKUP` | — | Multiple of serving cost charged (default `1.5` = 50% margin) |
+| `NETWORK` | ✅ | `mainnet` or `testnet` (selects token contracts, relay, Stacks API) |
+| `RELAY_URL` | — | x402 settlement relay (defaults per network) |
+| `STACKS_API` | — | Hiro API base (defaults per network) |
+| `DB` (D1) | ✅ | Provider directory (`providers` + `provider_keys`) |
+| `PROVIDERS` (KV) | ✅ | Ephemeral: wallet-auth replay nonces + stake cache |
+| `ADMIN_TOKEN` | — | `X-Admin-Token` for the operator flag endpoint (required to flag on mainnet) |
 | `SKIP_PAYMENT` | — | **Dev only.** `true` bypasses payment — hard-gated to non-mainnet |
+| `LEGION_*` | — | Optional 8% fee rail (off by default; see [Fees](#fees)) |
 
 ## Endpoints
 
@@ -58,69 +50,71 @@ ollama serve & ollama pull qwen2.5:7b
 |--------|------|------|-------|
 | GET | `/` | free | Service + payment info |
 | GET | `/health` | free | Health check |
-| GET | `/v1/models` | free | Catalog + live reference price per model |
-| GET | `/v1/providers` | free | Supply-side registry + reputation |
-| POST | `/v1/chat/completions` | **dynamic** | OpenAI-compatible; price by model + tokens |
-| POST | `/v1/chat` | fixed | Simple `{prompt}` demo, default model |
-| POST | `/v1/providers` | free | Register an external provider (**wallet-signature** required) |
-| PATCH | `/v1/providers/{id}` | free | Self-service update (name/models/payout/endpoint); **wallet-signature** authorized |
+| GET | `/skill.md` | free | Agent skill manifest (read this first) |
+| GET | `/v1/models` | free | Live catalog — every model from a registered provider + reference price |
+| GET | `/v1/providers` | free | Registered providers + health + `flagged` status |
+| GET | `/v1/schema` | free | Provider registration JSON Schema |
+| POST | `/v1/chat/completions` | **paid** | OpenAI-compatible; routes to the model's provider |
+| POST | `/v1/route/{id}/chat/completions` | **paid** | Call a specific provider; settles to them |
+| POST | `/v1/providers` | free | Register a provider (**wallet-signature** required; verified before listing) |
+| PATCH | `/v1/providers/{id}` | free | Self-service update (name/models/payout/token/endpoint); **wallet-signature** authorized |
 | POST | `/v1/providers/{id}/key` | free | Reveal or rotate the provider's shared key; **wallet-signature** authorized |
 | POST | `/v1/providers/{id}/flag` | free | **Operator only** (admin token): flag/unflag a provider |
 | POST | `/v1/feedback` | free | Submit reputation (Phase 3) |
 
 ## Fees
 
-**Providers keep 92%.** Registering and earning are free — no listing fee, no
+**Providers keep 100%.** Registering and earning are free — no listing fee, no
 bond required to earn. Each paid request settles **on-chain and non-custodial**
-through the model's legion fee rail (`legion-fees.route`): **92% → the provider's
-payout wallet**, **8% → the model's legion treasury**. The gateway never
-custodies funds. Cheap calls are floored (`LEGION_MIN_AMOUNT`) so the 8% skim
-always rounds to ≥1 base unit.
+via the direct x402 `exact` scheme: **100% → the provider's payout wallet**, in
+the token the provider chose (**sBTC** or **USDCx**). The gateway never custodies
+funds.
+
+> The 8% Legion fee rail (`legion-fees.route`) is disabled — it activates only
+> when the `LEGION_*` vars are set (see `wrangler.jsonc`). Re-add them to bring
+> back the 92/8 split and per-model legion treasuries.
 
 ## Enforcement & trust
-
-Be explicit about how bad providers are handled, so the catalog can be trusted:
 
 - **Who enforces:** the **marketplace operator**. A provider can be **flagged**, which
   de-routes it everywhere and drops it from the catalog. Flagging is a **manual operator
   action** via `POST /v1/providers/{id}/flag`, gated by `ADMIN_TOKEN` (the `X-Admin-Token`
   header). It is **not** a key/multisig and **not** a crowd vote — it is the operator.
-- **No auto-detection yet:** there is no automatic cheat-detection. A provider is flagged
-  only when the operator acts on a complaint or manual review. Agents/users can *report*; only
-  the operator can *flag*.
+- **No auto-detection yet:** a provider is flagged only when the operator acts on a complaint
+  or manual review. Agents/users can *report*; only the operator can *flag*.
 - **Transparency:** `flagged` + `flagReason` are public on `GET /v1/providers`. A flagged
   provider never serves traffic and is excluded from routing and the catalog.
 - **Mainnet safety:** the flag endpoint is disabled on mainnet unless `ADMIN_TOKEN` is set.
-- **Roadmap:** move the flag decision on-chain to a stake-weighted `legion-gov` vote (the
-  legion decides, not the operator).
+- **Roadmap:** move the flag decision on-chain to a stake-weighted `legion-gov` vote.
 
-## Pricing (dynamic, two axes)
+## Pricing
 
 ```
-price_usd  = (prompt_tokens + max_tokens)/1000 × costPer1kUsd × markup
-price_sats = ceil(price_usd / btc_usd × 1e8)        # 1-sat floor
+price_usd  = (prompt_tokens + max_tokens)/1e6 × pricePerMTokenUsd
+price_base = ceil(price_usd / rate)     # → sBTC sats (1e-8) or USDCx (1e-6)
 ```
 
-1. **By model** — `costPer1kUsd` per model (your GPU $/hr ÷ throughput; tune in `catalog.ts`). Big models cost more.
-2. **By market** — converted to sBTC/USDCx/STX at the **live** Coinbase rate, so the real (USD) price stays stable as BTC moves.
-
-sBTC has a 1-sat floor (~$0.001); for sub-cent calls, **USDCx** (6 decimals) prices exactly. Each response carries a `_marketplace` receipt: `pricePaid` (USD + token units), `servingCostUsd`, and the settlement `txId` — so realized margin is visible per call.
-
-> Phase 1.5: meter against actual usage (deposit → settle exact) to stop overcharging on short calls.
+Each provider declares `pricePerMTokenUsd` per model (or the marketplace default).
+The USD price is converted to the provider's chosen token at the **live** Coinbase
+rate, so the real price stays stable as BTC moves. sBTC has a 1-sat floor
+(~$0.001); for sub-cent calls, **USDCx** (6 decimals) prices exactly. Each
+response carries a `_marketplace` receipt with the provider, `paidTo`, and the
+settlement `txId`.
 
 ## x402 payment flow
 
-1. Client POSTs without `X-PAYMENT`.
-2. Gateway replies **402** with `{ maxAmountRequired, payTo, network, nonce, expiresAt, tokenType, tokenContract }`.
+1. Client POSTs without `payment-signature`.
+2. Gateway replies **402** with the price, `payTo` (the provider), `asset`, and `nonce`.
+   The advertised token is the one the provider chose.
 3. Client signs a token transfer to `payTo` — **does not broadcast**.
-4. Client retries with `X-PAYMENT: <signed-tx>` (and optional `X-PAYMENT-TOKEN-TYPE: sBTC|USDCx|STX`).
-5. Gateway settles via the AIBTC relay, then serves the inference.
+4. Client retries with `payment-signature: <base64 PaymentPayloadV2>`.
+5. Gateway settles via the AIBTC relay, then forwards the inference.
 
 ```bash
-curl -X POST http://localhost:8787/v1/chat/completions \
+curl -X POST https://inference.aibtc.com/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen2.5-32b","messages":[{"role":"user","content":"Hello"}]}'
-# -> 402 with the sBTC price for this model + token count
+  -d '{"model":"Qwen/Qwen2.5-7B-Instruct","messages":[{"role":"user","content":"Hello"}]}'
+# -> 402 with the price + payTo for the provider serving this model
 ```
 
 Agents on AIBTC pay automatically via `execute_x402_endpoint` (probe → sign → settle).
@@ -129,30 +123,25 @@ Agents on AIBTC pay automatically via `execute_x402_endpoint` (probe → sign �
 
 | File | Role |
 |------|------|
-| `src/index.ts` | Routes: discovery, paid inference, Phase 2/3 seams |
+| `src/index.ts` | Routes: discovery, paid inference, supply-side registration |
 | `src/x402-middleware.ts` | x402 settlement (fixed + dynamic) via the AIBTC relay |
-| `src/pricing.ts` | Dynamic pricing: serving cost × markup → live sBTC/USDCx/STX |
-| `src/catalog.ts` | Open models: id ↔ upstream model + per-1k cost basis |
-| `src/registry.ts` | Provider registry (supply side) + reputation hook |
-| `src/upstream.ts` | OpenAI-compatible client (HF Endpoint / vLLM / any) |
-
-## Hosting the model (the upstream)
-
-Recommended first deployment:
-- **Model:** an Apache-2.0 open weight, e.g. `Qwen/Qwen2.5-7B-Instruct`
-- **Server:** vLLM or HF Inference Endpoint (both expose `/v1/chat/completions`)
-- **Host:** HF Endpoint or RunPod **Serverless** (scale-to-zero → no idle GPU cost)
-- Point `UPSTREAM_BASE_URL` at it, set the model's `upstreamModel` in `catalog.ts`.
+| `src/directory.ts` | Provider directory (D1): register / verify / update / flag |
+| `src/schema.ts` | Registration contract + accepted payout tokens |
+| `src/pricing.ts` | USD → live sBTC/USDCx conversion |
+| `src/upstream.ts` | OpenAI-compatible client that forwards to a provider's endpoint |
+| `src/health.ts` | Endpoint health + inference verification (cron) |
+| `src/wallet-auth.ts` | Wallet-signature auth for provider self-service |
+| `src/model-legions.ts` / `src/legion.ts` | Optional per-model fee rail + stake ranking |
 
 ## Deploy
 
 ```bash
-wrangler login                          # no API token needed
-wrangler secret put RECIPIENT_ADDRESS
-wrangler secret put UPSTREAM_BASE_URL
-wrangler secret put UPSTREAM_API_KEY
-npm run deploy:staging                  # testnet relay
-npm run deploy:production               # mainnet relay
+wrangler login
+# create + migrate the directory DB, then paste its id into wrangler.jsonc
+wrangler d1 create inference-db-mainnet
+wrangler d1 execute inference-db-mainnet --remote --file=schema.sql
+npm run deploy:staging       # testnet
+npm run deploy:production    # mainnet
 ```
 
 ## Networks
@@ -160,4 +149,4 @@ npm run deploy:production               # mainnet relay
 | Env | NETWORK | Relay |
 |-----|---------|-------|
 | dev / staging | testnet | `https://x402-relay.aibtc.dev` |
-| production | mainnet | `https://x402-relay.aibtc.com` 
+| production | mainnet | `https://x402-relay.aibtc.com` |

@@ -9,24 +9,20 @@
   // Requests matching a built asset are served directly; everything else runs
   // the Worker (so /v1/*, /health hit Hono).
   "assets": { "directory": "./web/out" },
-  // Default deploy serves the v1 Legion marketplace on TESTNET (inference.aibtc.com).
-  // Real sBTC stays off until more providers, visible payouts, and audits — see PR.
+  // Default deploy = TESTNET (inference.aibtc.com). Legion fee-rail intentionally
+  // OMITTED: with no LEGION_* set, settle() uses the direct x402 "exact" scheme —
+  // non-custodial, 100% to the provider, in the provider's chosen token
+  // (sBTC/USDCx). Re-add the LEGION_* block to bring back the 8% skim.
   "vars": {
     "NETWORK": "testnet",
     "RELAY_URL": "https://x402-relay.aibtc.dev",
     "PRICE_MARKUP": "1.5",
     "STACKS_API": "https://api.testnet.hiro.so",
-    // v1 provider-Legion guild bundle (legion-agent-06). Settlement skims 8%
-    // into this treasury; LEGION_ENGAGE is the optional engagement-stake
-    // contract the gateway reads to rank higher-staked providers first.
-    "LEGION_OWNER": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9",
-    "LEGION_FEES": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-fees",
-    "LEGION_TREASURY": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-treasury",
-    "LEGION_ENGAGE": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-engage",
-    "LEGION_SBTC": "STV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RJ5XDY2.sbtc-token",
-    "LEGION_MIN_AMOUNT": "1250",
     "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
   },
+  // Gas sponsorship: x402-sponsor-relay's RelayRPC (same CF account). Sponsored
+  // payments settle through sponsorPayment — the public /settle never sponsors.
+  "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }],
   // Create with: wrangler kv namespace create PROVIDERS  → paste the id below.
   // PROVIDERS (KV) now holds only ephemeral data: wallet-auth replay nonces and
   // the legion stake cache. The provider directory lives in D1 (DB) below.
@@ -41,24 +37,15 @@
       "name": "gateway-staging",
       "workers_dev": true,
       "assets": { "directory": "./web/out" },
+      // Staging = TESTNET, fee-free (no LEGION_* → direct non-custodial settle).
       "vars": {
         "NETWORK": "testnet",
         "RELAY_URL": "https://x402-relay.aibtc.dev",
         "PRICE_MARKUP": "1.5",
-        // Legion fee-rail settlement (testnet). Non-secret config; UPSTREAM_* +
-        // (optionally) RECIPIENT_ADDRESS are still set via `wrangler secret put`.
         "STACKS_API": "https://api.testnet.hiro.so",
-        // v1 provider-Legion guild bundle (legion-agent-06). Settlement skims 8%
-        // into this treasury; LEGION_ENGAGE is the optional engagement-stake
-        // contract the gateway reads to rank higher-staked providers first.
-        "LEGION_OWNER": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9",
-        "LEGION_FEES": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-fees",
-        "LEGION_TREASURY": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-treasury",
-        "LEGION_ENGAGE": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-engage",
-        "LEGION_SBTC": "STV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RJ5XDY2.sbtc-token",
-        "LEGION_MIN_AMOUNT": "1250",
         "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
       },
+      "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-staging", "entrypoint": "RelayRPC" }],
       "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
       "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "58bab586-33b9-4036-83e8-c22f76379e3e" }],
       "triggers": { "crons": ["*/5 * * * *"] }
@@ -67,23 +54,22 @@
       "name": "gateway",
       "workers_dev": false,
       "assets": { "directory": "./web/out" },
-      // Production now runs the v1 Legion marketplace on TESTNET (mirrors the
-      // default vars above). Flip these back to mainnet to re-enable real sBTC.
+      // Production = MAINNET, fee-free. No LEGION_* → settle() uses the direct
+      // x402 "exact" scheme: non-custodial, 100% to the provider, in the token
+      // the provider chose (sBTC/USDCx; mainnet contracts in x402-middleware.ts).
+      // Gas is sponsored by the mainnet relay over the X402_RELAY binding below.
       "vars": {
-        "NETWORK": "testnet",
-        "RELAY_URL": "https://x402-relay.aibtc.dev",
+        "NETWORK": "mainnet",
+        "RELAY_URL": "https://x402-relay.aibtc.com",
         "PRICE_MARKUP": "1.5",
-        "STACKS_API": "https://api.testnet.hiro.so",
-        "LEGION_OWNER": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9",
-        "LEGION_FEES": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-fees",
-        "LEGION_TREASURY": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-treasury",
-        "LEGION_ENGAGE": "STGX5YP51NKM69ZMP6DVB6GAJAANCG5WB3718KD9.legion-engage",
-        "LEGION_SBTC": "STV9K21TBFAK4KNRJXF5DFP8N7W46G4V9RJ5XDY2.sbtc-token",
-        "LEGION_MIN_AMOUNT": "1250",
-        "RECIPIENT_ADDRESS": "ST2VN1G6EBXPMMAJKCSY1HR50YQCVFSK68KKP9SKW"
+        "STACKS_API": "https://api.hiro.so"
       },
+      "services": [{ "binding": "X402_RELAY", "service": "x402-sponsor-relay-production", "entrypoint": "RelayRPC" }],
       "kv_namespaces": [{ "binding": "PROVIDERS", "id": "b276cbda64074ccca34585c7837f7c49" }],
-      "d1_databases": [{ "binding": "DB", "database_name": "inference-db", "database_id": "58bab586-33b9-4036-83e8-c22f76379e3e" }],
+      // Fresh MAINNET D1 (created 2026-07-21) — keeps mainnet providers isolated
+      // from the shared testnet directory (testnet ST… rows are unpayable on
+      // mainnet). Schema applied via `wrangler d1 execute … --remote --file=schema.sql`.
+      "d1_databases": [{ "binding": "DB", "database_name": "inference-db-mainnet", "database_id": "81a777bf-fd21-49f9-9b4c-241cc5eb3f83" }],
       "triggers": { "crons": ["*/5 * * * *"] }
     }
   }

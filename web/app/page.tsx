@@ -168,7 +168,7 @@ export default function Home() {
             Get paid in <span className="text-[#f7931a]">Bitcoin</span> to run open models.
           </h1>
           <p className="mt-4 max-w-xl text-[15px] text-[#9aa3af]">
-            One command turns your machine into a paid inference endpoint. You keep <span className="text-[#f2f4f7]">92%</span>, paid per request in sBTC — no account, no gatekeeping.
+            One command turns your machine into a paid inference endpoint. You keep <span className="text-[#f2f4f7]">100%</span>, paid per request in sBTC or USDCx — no account, no gatekeeping.
           </p>
           <div className="mt-7 flex flex-wrap gap-3">
             {[{ n: stats.total, l: "providers" }, { n: stats.live, l: "live now", accent: true }, { n: stats.models, l: "models" }].map((s) => (
@@ -321,13 +321,8 @@ function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose:
   const mcp = `execute_x402_endpoint({\n  url: "${routeUrl}",\n  method: "POST",\n  data: {\n    model: "${modelId}",\n    messages: [{ role: "user", content: ${JSON.stringify(prompt)} }]\n  }\n})`;
   const curl = `curl -X POST ${routeUrl} \\\n  -H 'Content-Type: application/json' \\\n  -d '${JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }] })}'`;
 
-  // Fee split: of each paid call, 92% goes to the provider, 8% to the model's
-  // legion treasury. When we have a live quote we show the actual amounts.
-  const split = quote ? (() => {
-    const total = Number(quote.amount) || 0;
-    const provider = Math.round(total * 0.92);
-    return { provider: String(provider), treasury: String(total - provider) };
-  })() : null;
+  // Fee-free: every paid call goes 100% to the provider (direct, non-custodial).
+  const split = quote ? { provider: quote.amount } : null;
 
   return (
     <div className="overlay-in fixed inset-0 z-50 bg-black/65 backdrop-blur-sm" onClick={onClose}>
@@ -359,28 +354,21 @@ function ProviderDetail({ provider: p, onClose }: { provider: Provider; onClose:
 
           <div className="mt-4 grid gap-2 text-xs text-[#9aa3af]">
             <div>endpoint <span className="mono break-all text-[#cfd5dd]">{p.endpoint}</span></div>
-            <div>pays to <span className="mono break-all text-[#cfd5dd]">{p.payoutAddress}</span></div>
+            <div>pays to <span className="mono break-all text-[#cfd5dd]">{p.payoutAddress}</span> <span className="text-[#5b626c]">in</span> <span className="text-[#cfd5dd]">{p.acceptedToken ?? "sBTC"}</span></div>
           </div>
 
-          {/* signature: the 92/8 fee split, shown as a bar clients can read at a glance */}
+          {/* signature: fee-free — 100% to the provider, shown as a full bar */}
           <div className="mt-5 rounded-xl border border-[#23262d] bg-[#101216] p-4">
             <div className="flex items-baseline justify-between">
               <h3 className="text-xs uppercase tracking-wider text-[#9aa3af]">Per paid call</h3>
               <span className="wide text-base text-[#f7931a]">{quote ? `≈ ${formatPrice(quote.amount, quote.asset)}` : "price when reachable"}</span>
             </div>
             <div className="mt-3 flex h-2.5 gap-0.5 overflow-hidden rounded-full">
-              <div className="h-full rounded-l-full bg-[#f7931a]" style={{ width: "92%" }} />
-              <div className="h-full rounded-r-full bg-[#6b6152]" style={{ width: "8%" }} />
+              <div className="h-full rounded-full bg-[#f7931a]" style={{ width: "100%" }} />
             </div>
-            <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-              <div>
-                <div className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#f7931a]" /><span className="text-[#f2f4f7]">92% · provider</span></div>
-                {split && <div className="mono mt-1 text-[#9aa3af]">{formatPrice(split.provider, quote!.asset)}</div>}
-              </div>
-              <div>
-                <div className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#6b6152]" /><span className="text-[#f2f4f7]">8% · legion treasury</span></div>
-                {split && <div className="mono mt-1 text-[#9aa3af]">{formatPrice(split.treasury, quote!.asset)}</div>}
-              </div>
+            <div className="mt-3 text-xs">
+              <div className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#f7931a]" /><span className="text-[#f2f4f7]">100% · provider</span></div>
+              {split && <div className="mono mt-1 text-[#9aa3af]">{formatPrice(split.provider, quote!.asset)}</div>}
             </div>
             <p className="mt-3 text-[11px] leading-relaxed text-[#5b626c]">Settled on-chain and non-custodial — the provider is paid directly through our x402 wrapper.</p>
           </div>
@@ -487,6 +475,8 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
   // Inline fields for an already-public endpoint (skipped when a schema.json URL
   // is pasted — the manifest carries name/wallet/models itself).
   const [pf, setPf] = useState({ name: "", models: "" });
+  // Token this provider is paid in (applies to both tabs). Client pays in it.
+  const [payToken, setPayToken] = useState<"sBTC" | "USDCx">("sBTC");
 
   // After the user runs the connect command on their machine, the script
   // registers itself — so we poll the directory and confirm the moment the
@@ -546,7 +536,7 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
     const url = src.trim();
     const apiKey = pubKey.trim() || undefined;
     if (pubIsManifest) {
-      sendPublic({ manifestUrl: url, payoutAddress: payout, ...(apiKey ? { apiKey } : {}) });
+      sendPublic({ manifestUrl: url, payoutAddress: payout, acceptedToken: payToken, ...(apiKey ? { apiKey } : {}) });
       return;
     }
     const models = pf.models.split(",").map((m) => m.trim()).filter(Boolean);
@@ -554,6 +544,7 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
       name: pf.name.trim(),
       endpoint: url,
       payoutAddress: payout,
+      acceptedToken: payToken,
       models,
       ...(apiKey ? { apiKey } : {}),
     });
@@ -586,7 +577,7 @@ function RegisterModal({ onClose, onDone, network, wallet, onConnect }: { onClos
        Timestamp: <now>
    - Get my public key and ${network} address from get_wallet_info.
    - POST with headers X-Stacks-Signature, X-Stacks-Public-Key, X-Stacks-Timestamp and body:
-       {"name":"${name || "My node"}","endpoint":"<endpoint>","payoutAddress":"${payout || "<wallet>"}","models":["${modelId || "<model>"}"]}
+       {"name":"${name || "My node"}","endpoint":"<endpoint>","payoutAddress":"${payout || "<wallet>"}","acceptedToken":"${payToken}","models":["${modelId || "<model>"}"]}
 
 Keep the tunnel running and tell me when my node shows up in the marketplace.`;
 
@@ -630,8 +621,16 @@ Keep the tunnel running and tell me when my node shows up in the marketplace.`;
         </div>
 
         <p className="mt-3 rounded-md border border-[#35c759]/25 bg-[#35c759]/[0.06] px-2.5 py-2 text-[11px] leading-relaxed text-[#9aa3af]">
-          <span className="text-[#f2f4f7]">Fee:</span> each paid request settles on-chain, non-custodial — <span className="text-[#35c759]">92% goes straight to your payout wallet</span>, an <span className="text-[#f2f4f7]">8%</span> fee routes to the model&apos;s legion treasury. No listing fee, no fee to join.
+          <span className="text-[#f2f4f7]">Fee:</span> each paid request settles on-chain, non-custodial — <span className="text-[#35c759]">100% goes straight to your payout wallet</span>. No listing fee, no fee to join.
         </p>
+
+        <label className="mt-3 block">
+          <span className="mb-1.5 block text-xs text-[#9aa3af]">Get paid in</span>
+          <select value={payToken} onChange={(e) => setPayToken(e.target.value as "sBTC" | "USDCx")} className={inputCls}>
+            <option value="sBTC">sBTC</option>
+            <option value="USDCx">USDCx</option>
+          </select>
+        </label>
 
         {tab === "local" ? (
           <div className="mt-4">

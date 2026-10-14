@@ -13,8 +13,8 @@
  */
 
 import type { HealthResult } from './health';
-import type { ModelSpec } from './schema';
-import { normalizeModels } from './schema';
+import type { ModelSpec, PayoutToken } from './schema';
+import { normalizeModels, PAYOUT_TOKENS, DEFAULT_PAYOUT_TOKEN } from './schema';
 
 export interface Provider {
   id: string;
@@ -25,6 +25,8 @@ export interface Provider {
   api: string;
   /** Stacks address that receives payment for this provider's inference. */
   payoutAddress: string;
+  /** Token this provider is paid in ('sBTC' or 'USDCx'). Clients must pay in it. */
+  acceptedToken: PayoutToken;
   /** Structured per-model capability specs the provider declares. */
   models: ModelSpec[];
   description?: string;
@@ -50,6 +52,8 @@ export interface ProviderInput {
   endpoint: string;
   payoutAddress: string;
   api?: string;
+  /** Token to be paid in ('sBTC' or 'USDCx'). Defaults to sBTC. */
+  acceptedToken?: PayoutToken;
   models: Array<string | ModelSpec>;
   description?: string;
   /** Shared secret the endpoint requires; stored server-side, never returned. */
@@ -105,6 +109,17 @@ export function assertPayoutForNetwork(address: string, network?: 'mainnet' | 't
   if (!ok) throw new Error(`payoutAddress must be a ${network} Stacks address (${network === 'mainnet' ? 'SP/SM' : 'ST/SN'})`);
 }
 
+/** Coerce a loose token value to a valid PayoutToken, defaulting when absent.
+ *  Case-insensitive so 'sbtc'/'usdcx' from a manifest still resolve. Throws on a
+ *  present-but-unsupported value so a typo can't silently fall back. */
+export function normalizePayoutToken(input: unknown): PayoutToken {
+  if (input == null || input === '') return DEFAULT_PAYOUT_TOKEN;
+  const raw = String(input).trim().toLowerCase();
+  const match = PAYOUT_TOKENS.find((t) => t.toLowerCase() === raw);
+  if (!match) throw new Error(`acceptedToken must be one of ${PAYOUT_TOKENS.join(', ')}`);
+  return match;
+}
+
 type DB = D1Database;
 
 function slugId(name: string): string {
@@ -119,6 +134,7 @@ interface ProviderRow {
   endpoint: string;
   api: string;
   payout_address: string;
+  accepted_token: string | null;
   description: string | null;
   secured: number;
   status: string;
@@ -137,6 +153,7 @@ function rowToProvider(r: ProviderRow): Provider {
     endpoint: r.endpoint,
     api: r.api,
     payoutAddress: r.payout_address,
+    acceptedToken: normalizePayoutToken(r.accepted_token),
     models: JSON.parse(r.models) as ModelSpec[],
     ...(r.description ? { description: r.description } : {}),
     secured: !!r.secured,
@@ -163,15 +180,16 @@ export async function getProvider(db: DB, id: string): Promise<Provider | undefi
 async function writeProvider(db: DB, p: Provider): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO providers (id, name, endpoint, api, payout_address, description, secured, status, flagged, flag_reason, health, models, reputation, registered_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO providers (id, name, endpoint, api, payout_address, accepted_token, description, secured, status, flagged, flag_reason, health, models, reputation, registered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name=excluded.name, endpoint=excluded.endpoint, api=excluded.api, payout_address=excluded.payout_address,
-         description=excluded.description, secured=excluded.secured, status=excluded.status, flagged=excluded.flagged,
+         accepted_token=excluded.accepted_token, description=excluded.description, secured=excluded.secured,
+         status=excluded.status, flagged=excluded.flagged,
          flag_reason=excluded.flag_reason, health=excluded.health, models=excluded.models, reputation=excluded.reputation`,
     )
     .bind(
-      p.id, p.name, p.endpoint, p.api, p.payoutAddress, p.description ?? null,
+      p.id, p.name, p.endpoint, p.api, p.payoutAddress, p.acceptedToken, p.description ?? null,
       p.secured ? 1 : 0, p.status, p.flagged ? 1 : 0, p.flagReason ?? null,
       p.health ? JSON.stringify(p.health) : null, JSON.stringify(p.models),
       p.reputation ? JSON.stringify(p.reputation) : null, p.registeredAt,
@@ -186,6 +204,7 @@ export async function registerProvider(db: DB, input: ProviderInput): Promise<Pr
   const payoutAddress = (input.payoutAddress || '').trim();
   const models = normalizeModels(input.models);
   const api = (input.api || 'openai-chat').trim();
+  const acceptedToken = normalizePayoutToken(input.acceptedToken);
 
   if (!name) throw new Error('name is required (set it in schema.json or the form)');
   assertSafeEndpoint(endpoint, input.allowLocal ?? false); // SSRF guard
@@ -205,6 +224,7 @@ export async function registerProvider(db: DB, input: ProviderInput): Promise<Pr
     endpoint,
     api,
     payoutAddress,
+    acceptedToken,
     models,
     ...(input.description ? { description: input.description.trim() } : {}),
     secured: Boolean(input.apiKey),
@@ -242,6 +262,8 @@ export interface ProviderUpdate {
   endpoint?: string;
   payoutAddress?: string;
   api?: string;
+  /** Change the token to be paid in ('sBTC' or 'USDCx'). */
+  acceptedToken?: PayoutToken;
   models?: Array<string | ModelSpec>;
   description?: string;
   /** Rotate the shared secret (stored server-side, never returned). */
@@ -303,6 +325,10 @@ export async function prepareUpdate(db: DB, id: string, patch: ProviderUpdate): 
   if (patch.api !== undefined) {
     const api = patch.api.trim();
     if (api) next.api = api;
+  }
+
+  if (patch.acceptedToken !== undefined) {
+    next.acceptedToken = normalizePayoutToken(patch.acceptedToken);
   }
 
   if (patch.models !== undefined) {
